@@ -1,0 +1,146 @@
+{
+  "party8/11.89_13.99.png": {
+    "x": 11.89,
+    "y": 13.99,
+    "party_sizes": [
+      8
+    ],
+    "marker_rx": 0.4969,
+    "marker_ry": 0.5037
+  },
+  "party8/13.49_16.72.png": {
+    "x": 13.49,
+    "y": 16.72,
+    "party_sizes": [
+      8
+    ],
+    "marker_rx": 0.4969,
+    "marker_ry": 0.511
+  },
+  "party8/20.1_17.08.png": {
+    "x": 20.1,
+    "y": 17.08,
+    "party_sizes": [
+      8
+    ],
+    "marker_rx": 0.4969,
+    "marker_ry": 0.5037
+  },
+  "party8/20.57_9.24.png": {
+    "x": 20.57,
+    "y": 9.24,
+    "party_sizes": [
+      8
+    ],
+    "marker_rx": 0.5,
+    "marker_ry": 0.511
+  },
+  "party8/30.89_17.29.png": {
+    "x": 30.89,
+    "y": 17.29,
+    "party_sizes": [
+      8
+    ],
+    "marker_rx": 0.4969,
+    "marker_ry": 0.511
+  },
+  "party8/33.27_31.78.png": {
+    "x": 33.27,
+    "y": 31.78,
+    "party_sizes": [
+      8
+    ],
+    "marker_rx": 0.5,
+    "marker_ry": 0.511
+  },
+  "party8/34.88_10.73.png": {
+    "x": 34.88,
+    "y": 10.73,
+    "party_sizes": [
+      8
+    ],
+    "marker_rx": 0.4938,
+    "marker_ry": 0.5037
+  },
+  "party8/7.88_18.11.png": {
+    "x": 7.88,
+    "y": 18.11,
+    "party_sizes": [
+      8
+    ],
+    "marker_rx": 0.4969,
+    "marker_ry": 0.511
+  },
+  "solo/15.25_32.43.png": {
+    "x": 15.25,
+    "y": 32.43,
+    "party_sizes": [
+      1
+    ],
+    "marker_rx": 0.5,
+    "marker_ry": 0.5037
+  },
+  "solo/19.49_21.7.png": {
+    "x": 19.49,
+    "y": 21.7,
+    "party_sizes": [
+      1
+    ],
+    "marker_rx": 0.5,
+    "marker_ry": 0.511
+  },
+  "solo/23.24_24.33.png": {
+    "x": 23.24,
+    "y": 24.33,
+    "party_sizes": [
+      1
+    ],
+    "marker_rx": 0.4969,
+    "marker_ry": 0.5037
+  },
+  "solo/27.54_32.7.png": {
+    "x": 27.54,
+    "y": 32.7,
+    "party_sizes": [
+      1
+    ],
+    "marker_rx": 0.5,
+    "marker_ry": 0.511
+  },
+  "solo/28.13_12.82.png": {
+    "x": 28.13,
+    "y": 12.82,
+    "party_sizes": [
+      1
+    ],
+    "marker_rx": 0.4969,
+    "marker_ry": 0.511
+  },
+  "solo/35.11_19.49.png": {
+    "x": 35.11,
+    "y": 19.49,
+    "party_sizes": [
+      1
+    ],
+    "marker_rx": 0.4969,
+    "marker_ry": 0.5037
+  },
+  "solo/37.51_27.5.png": {
+    "x": 37.51,
+    "y": 27.5,
+    "party_sizes": [
+      1
+    ],
+    "marker_rx": 0.4969,
+    "marker_ry": 0.5037
+  },
+  "solo/8.48_22.37.png": {
+    "x": 8.48,
+    "y": 22.37,
+    "party_sizes": [
+      1
+    ],
+    "marker_rx": 0.4969,
+    "marker_ry": 0.5037
+  }
+}

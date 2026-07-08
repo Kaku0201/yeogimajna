@@ -1,0 +1,74 @@
+{
+  "party8/11.88_33.2.png": {
+    "x": 11.88,
+    "y": 33.2,
+    "party_sizes": [
+      8
+    ],
+    "marker_rx": 0.5,
+    "marker_ry": 0.5076
+  },
+  "party8/13.01_8.78.png": {
+    "x": 13.01,
+    "y": 8.78,
+    "party_sizes": [
+      8
+    ],
+    "marker_rx": 0.4968,
+    "marker_ry": 0.5076
+  },
+  "party8/16.88_31.08.png": {
+    "x": 16.88,
+    "y": 31.08,
+    "party_sizes": [
+      8
+    ],
+    "marker_rx": 0.6968,
+    "marker_ry": 0.5267
+  },
+  "party8/22.58_24.66.png": {
+    "x": 22.58,
+    "y": 24.66,
+    "party_sizes": [
+      8
+    ],
+    "marker_rx": 0.4935,
+    "marker_ry": 0.5076
+  },
+  "party8/27.24_24.35.png": {
+    "x": 27.24,
+    "y": 24.35,
+    "party_sizes": [
+      8
+    ],
+    "marker_rx": 0.5,
+    "marker_ry": 0.5076
+  },
+  "party8/29.07_17.57.png": {
+    "x": 29.07,
+    "y": 17.57,
+    "party_sizes": [
+      8
+    ],
+    "marker_rx": 0.5,
+    "marker_ry": 0.5153
+  },
+  "party8/29.95_9.52.png": {
+    "x": 29.95,
+    "y": 9.52,
+    "party_sizes": [
+      8
+    ],
+    "marker_rx": 0.5,
+    "marker_ry": 0.5076
+  },
+  "party8/37.19_18.59.png": {
+    "x": 37.19,
+    "y": 18.59,
+    "party_sizes": [
+      8
+    ],
+    "marker_rx": 0.5065,
+    "marker_ry": 0.5153
+  }
+}

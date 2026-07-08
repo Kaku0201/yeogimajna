@@ -1,0 +1,146 @@
+{
+  "party8/12.6_14.44.png": {
+    "x": 12.6,
+    "y": 14.44,
+    "party_sizes": [
+      8
+    ],
+    "marker_rx": 0.4938,
+    "marker_ry": 0.5073
+  },
+  "party8/18.23_21.1.png": {
+    "x": 18.23,
+    "y": 21.1,
+    "party_sizes": [
+      8
+    ],
+    "marker_rx": 0.5,
+    "marker_ry": 0.5073
+  },
+  "party8/18.58_11.67.png": {
+    "x": 18.58,
+    "y": 11.67,
+    "party_sizes": [
+      8
+    ],
+    "marker_rx": 0.5,
+    "marker_ry": 0.5037
+  },
+  "party8/19.73_34.56.png": {
+    "x": 19.73,
+    "y": 34.56,
+    "party_sizes": [
+      8
+    ],
+    "marker_rx": 0.5,
+    "marker_ry": 0.5037
+  },
+  "party8/25.68_19.79.png": {
+    "x": 25.68,
+    "y": 19.79,
+    "party_sizes": [
+      8
+    ],
+    "marker_rx": 0.5,
+    "marker_ry": 0.5037
+  },
+  "party8/29.37_8.44.png": {
+    "x": 29.37,
+    "y": 8.44,
+    "party_sizes": [
+      8
+    ],
+    "marker_rx": 0.4938,
+    "marker_ry": 0.5037
+  },
+  "party8/31.98_32.95.png": {
+    "x": 31.98,
+    "y": 32.95,
+    "party_sizes": [
+      8
+    ],
+    "marker_rx": 0.4938,
+    "marker_ry": 0.5037
+  },
+  "party8/35.6_16.99.png": {
+    "x": 35.6,
+    "y": 16.99,
+    "party_sizes": [
+      8
+    ],
+    "marker_rx": 0.4938,
+    "marker_ry": 0.5037
+  },
+  "solo/13.98_25.23.png": {
+    "x": 13.98,
+    "y": 25.23,
+    "party_sizes": [
+      1
+    ],
+    "marker_rx": 0.4938,
+    "marker_ry": 0.5073
+  },
+  "solo/17.48_9.65.png": {
+    "x": 17.48,
+    "y": 9.65,
+    "party_sizes": [
+      1
+    ],
+    "marker_rx": 0.5,
+    "marker_ry": 0.5073
+  },
+  "solo/17.82_33.25.png": {
+    "x": 17.82,
+    "y": 33.25,
+    "party_sizes": [
+      1
+    ],
+    "marker_rx": 0.5,
+    "marker_ry": 0.5073
+  },
+  "solo/21.99_14.9.png": {
+    "x": 21.99,
+    "y": 14.9,
+    "party_sizes": [
+      1
+    ],
+    "marker_rx": 0.5,
+    "marker_ry": 0.5073
+  },
+  "solo/22.14_27.08.png": {
+    "x": 22.14,
+    "y": 27.08,
+    "party_sizes": [
+      1
+    ],
+    "marker_rx": 0.5,
+    "marker_ry": 0.5073
+  },
+  "solo/34.71_26.29.png": {
+    "x": 34.71,
+    "y": 26.29,
+    "party_sizes": [
+      1
+    ],
+    "marker_rx": 0.5,
+    "marker_ry": 0.5073
+  },
+  "solo/35.51_11.05.png": {
+    "x": 35.51,
+    "y": 11.05,
+    "party_sizes": [
+      1
+    ],
+    "marker_rx": 0.5,
+    "marker_ry": 0.5073
+  },
+  "solo/6.76_15.23.png": {
+    "x": 6.76,
+    "y": 15.23,
+    "party_sizes": [
+      1
+    ],
+    "marker_rx": 0.5,
+    "marker_ry": 0.5073
+  }
+}

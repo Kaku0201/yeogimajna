@@ -1,0 +1,33 @@
+# 빌드 산출물
+build/
+dist/
+*.zip
+
+# Tesseract 번들 (빌드 시 stage_tesseract.ps1 로 생성)
+vendor/tesseract/tesseract.exe
+vendor/tesseract/*.dll
+vendor/tesseract/tessdata/
+assets/waymarks.ico
+
+# 디버그
+debug_query.png
+debug_*.png
+debug_party/
+logs/
+_*.png
+_*.txt
+_diag_*.py
+_verify_*.py
+_dump_*.py
+_tmp_*.py
+srcdump_*
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 사용자 데이터 (배포 zip 미포함)
+match_stats.json
+learned_refs.json

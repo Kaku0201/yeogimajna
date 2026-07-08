@@ -1,0 +1,191 @@
+{
+  "party8/16.34_23.21.png": {
+    "x": 16.34,
+    "y": 23.21,
+    "party_sizes": [
+      8
+    ],
+    "marker_rx": 0.4969,
+    "marker_ry": 0.5
+  },
+  "party8/17.27_12.61.png": {
+    "x": 17.27,
+    "y": 12.61,
+    "party_sizes": [
+      8
+    ],
+    "marker_rx": 0.5435,
+    "marker_ry": 0.4562
+  },
+  "party8/22.82_19.51.png": {
+    "x": 22.82,
+    "y": 19.51,
+    "party_sizes": [
+      8
+    ],
+    "marker_rx": 0.4969,
+    "marker_ry": 0.5
+  },
+  "solo/16.06_20.32.png": {
+    "x": 16.06,
+    "y": 20.32,
+    "party_sizes": [
+      1
+    ],
+    "marker_rx": 0.4907,
+    "marker_ry": 0.5
+  },
+  "solo/16.75_16.32.png": {
+    "x": 16.75,
+    "y": 16.32,
+    "party_sizes": [
+      1
+    ],
+    "marker_rx": 0.4969,
+    "marker_ry": 0.5073
+  },
+  "solo/17.51_19.01.png": {
+    "x": 17.51,
+    "y": 19.01,
+    "party_sizes": [
+      1
+    ],
+    "marker_rx": 0.5,
+    "marker_ry": 0.5
+  },
+  "solo/18.09_21.32.png": {
+    "x": 18.09,
+    "y": 21.32,
+    "party_sizes": [
+      1
+    ],
+    "marker_rx": 0.5093,
+    "marker_ry": 0.5073
+  },
+  "solo/18.35_17.58.png": {
+    "x": 18.35,
+    "y": 17.58,
+    "party_sizes": [
+      1
+    ],
+    "marker_rx": 0.4352,
+    "marker_ry": 0.5584
+  },
+  "solo/19.2_13.53.png": {
+    "x": 19.2,
+    "y": 13.53,
+    "party_sizes": [
+      1
+    ],
+    "marker_rx": 0.4969,
+    "marker_ry": 0.5073
+  },
+  "solo/20.08_22.11.png": {
+    "x": 20.08,
+    "y": 22.11,
+    "party_sizes": [
+      1
+    ],
+    "marker_rx": 0.5031,
+    "marker_ry": 0.5073
+  },
+  "solo/20.71_13.2.png": {
+    "x": 20.71,
+    "y": 13.2,
+    "party_sizes": [
+      1
+    ],
+    "marker_rx": 0.5031,
+    "marker_ry": 0.5
+  },
+  "solo/21.43_15.24.png": {
+    "x": 21.43,
+    "y": 15.24,
+    "party_sizes": [
+      1
+    ],
+    "marker_rx": 0.5,
+    "marker_ry": 0.5073
+  },
+  "solo/21.93_22.59.png": {
+    "x": 21.93,
+    "y": 22.59,
+    "party_sizes": [
+      1
+    ],
+    "marker_rx": 0.4414,
+    "marker_ry": 0.5584
+  },
+  "solo/22.31_33.75.png": {
+    "x": 22.31,
+    "y": 33.75,
+    "party_sizes": [
+      1
+    ],
+    "marker_rx": 0.5,
+    "marker_ry": 0.5073
+  },
+  "solo/23.51_29.76.png": {
+    "x": 23.51,
+    "y": 29.76,
+    "party_sizes": [
+      1
+    ],
+    "marker_rx": 0.4969,
+    "marker_ry": 0.5073
+  },
+  "solo/24.33_34.3.png": {
+    "x": 24.33,
+    "y": 34.3,
+    "party_sizes": [
+      1
+    ],
+    "marker_rx": 0.4969,
+    "marker_ry": 0.5
+  },
+  "solo/25.33_18.06.png": {
+    "x": 25.33,
+    "y": 18.06,
+    "party_sizes": [
+      1
+    ],
+    "marker_rx": 0.4969,
+    "marker_ry": 0.5073
+  },
+  "solo/25.69_20.18.png": {
+    "x": 25.69,
+    "y": 20.18,
+    "party_sizes": [
+      1
+    ],
+    "marker_rx": 0.4969,
+    "marker_ry": 0.5073
+  },
+  "solo/26.74_30.93.png": {
+    "x": 26.74,
+    "y": 30.93,
+    "party_sizes": [
+      1
+    ],
+    "marker_rx": 0.4969,
+    "marker_ry": 0.5
+  },
+  "solo/27.5_20.77.png": {
+    "x": 27.5,
+    "y": 20.77,
+    "party_sizes": [
+      1
+    ],
+    "marker_rx": 0.4969,
+    "marker_ry": 0.5073
+  },
+  "solo/29.73_19.37.png": {
+    "x": 29.73,
+    "y": 19.37,
+    "party_sizes": [
+      1
+    ],
+    "marker_rx": 0.5031,
+    "marker_ry": 0.5
+  }
+}

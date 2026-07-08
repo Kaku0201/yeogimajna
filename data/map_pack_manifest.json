@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "description": "여기맞나? 지도 데이터 팩 — 확장팩별 지역 PNG + zones.json",
+  "download_url": "",
+  "min_detail_maps": 1,
+  "min_match_templates": 0,
+  "release_notes": "maps/{신생|창천|…}/{zone_id}.png 형식"
+}
