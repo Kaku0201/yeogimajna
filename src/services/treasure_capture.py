@@ -315,7 +315,9 @@ class TreasureCaptureProcessor:
         x1, y1, x2, y2 = best[0], best[1], best[2], best[3]
         pad_x = max(4, int(width * 0.04))
         # 위·아래 패딩 — 글자 획이 잘리면 OCR이 깨짐
-        pad_top = max(3, int(height * 0.02))
+        # (안티에일리어싱된 획 끝부분은 흰 픽셀 수가 적어 band 탐지에서 누락되기 쉬움 —
+        #  아래쪽과 동일하게 넉넉히 잡아 ㄹ 등의 위쪽 삐침이 잘리지 않도록 함)
+        pad_top = max(8, int(height * 0.045))
         pad_bottom = max(6, int(height * 0.035))
         return (
             max(0, x1 - pad_x),
@@ -1979,7 +1981,7 @@ class TreasureCaptureProcessor:
         best_text: Optional[str] = None
 
         ocr_calls = 0
-        max_ocr_calls = 18
+        max_ocr_calls = 40
 
         banner_crops = self._banner_crops(image)
         if not banner_crops:
