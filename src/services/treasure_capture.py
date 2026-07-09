@@ -131,6 +131,9 @@ class TreasureCaptureProcessor:
         self._tesseract_available = self._check_tesseract()
         self._last_party_trace: PartyDetectTrace | None = None
         self._party_debug_saved = False
+        self._zone_lexicon: tuple[frozenset[str], str, list[tuple[dict, str]]] | None = (
+            None
+        )
 
     @property
     def last_party_trace(self) -> PartyDetectTrace | None:
@@ -1981,7 +1984,7 @@ class TreasureCaptureProcessor:
         best_text: Optional[str] = None
 
         ocr_calls = 0
-        max_ocr_calls = 40
+        max_calls_per_crop = 12
 
         banner_crops = self._banner_crops(image)
         if not banner_crops:
@@ -1993,15 +1996,18 @@ class TreasureCaptureProcessor:
             return best_zone, best_score, best_text
 
         logger.debug(
-            "banner_ocr 시작: image=%dx%d crops=%d",
+            "banner_ocr 시작: image=%dx%d crops=%d slot_h=%d",
             image.width,
             image.height,
             len(banner_crops),
+            self.fixed_banner_target_zone(image.width, image.height)[3],
         )
 
         for crop_idx, banner in enumerate(banner_crops):
+            crop_calls = 0
             for text in self._ocr_banner_candidates(banner):
                 ocr_calls += 1
+                crop_calls += 1
                 if self._is_overlay_ocr_noise(text):
                     logger.debug("banner_ocr noise 필터됨: %r", text)
                     continue
@@ -2014,7 +2020,7 @@ class TreasureCaptureProcessor:
                         text,
                     )
                     continue
-                zone, score = self._match_banner_text_scored(text)
+                zone, score = self._match_banner_text_scored_with_runs(text)
                 logger.debug(
                     "banner_ocr candidate text=%r -> zone=%s score=%.3f",
                     text,
@@ -2029,13 +2035,14 @@ class TreasureCaptureProcessor:
                         return best_zone, best_score, best_text
                 if best_score >= self.BANNER_OCR_EARLY_EXIT:
                     return best_zone, best_score, best_text
-                if ocr_calls >= max_ocr_calls and best_score <= 0.0:
+                if crop_calls >= max_calls_per_crop and best_score < 0.55:
                     logger.debug(
-                        "banner_ocr 조기 중단: ocr_calls=%d best_score=%.3f",
-                        ocr_calls,
+                        "banner_ocr crop %d 조기 중단: crop_calls=%d best_score=%.3f",
+                        crop_idx,
+                        crop_calls,
                         best_score,
                     )
-                    return best_zone, best_score, best_text
+                    break
             if best_score >= self.BANNER_OCR_EARLY_EXIT:
                 return best_zone, best_score, best_text
             if crop_idx >= 1 and best_score >= 0.72:
@@ -2083,7 +2090,7 @@ class TreasureCaptureProcessor:
         return best_zone, best_score, best_text, best_map_window
 
     def _banner_crops(self, image: Image.Image) -> list[Image.Image]:
-        """배너 OCR용 크롭 후보 — 상하단 픽셀 잘림 방지 패딩"""
+        """배너 OCR용 크롭 — 초록 슬롯(상단 22%) + 좌측 지역명 영역 우선"""
         width, height = image.size
         crops: list[Image.Image] = []
         seen: set[tuple[int, int, int, int]] = set()
@@ -2102,34 +2109,36 @@ class TreasureCaptureProcessor:
             padded_img = ImageOps.expand(cropped_img, border=6, fill="black")
             crops.append(padded_img)
 
+        slot = self.fixed_banner_target_zone(width, height)
+        _sx1, _sy1, _sx2, sy2 = slot
         rgb = np.array(image.convert("RGB"))
-
-        title_band = self._find_title_text_band(rgb)
-        if title_band is not None:
-            x1, y1, x2, y2 = title_band
-            add_crop((x1, y1, x2, y2))
-            add_crop((0, max(0, y1 - 2), width, min(height, y2 + 3)))
-            # 지역명 + 금테두리 상단 — OCR 안정용 여유 높이
-            tall_h = max(y2 + 8, y1 + max(18, int(height * 0.12)))
-            add_crop((0, max(0, y1 - 4), width, min(height, tall_h)))
-            add_crop((int(width * 0.02), max(0, y1 - 2), int(width * 0.70), min(height, tall_h)))
-
         band = self._find_banner_band_bounds(rgb)
+        # 지역명은 좌측 — 우측 파티 아이콘·지형 노이즈 제외
+        text_left = int(width * 0.04)
+        text_right = int(width * 0.62)
+        crop_bottom = min(height, sy2)
+
+        # 1) 초록 슬롯 — y1=0 고정 (밴드 y1은 글자 꼭대기보다 아래라 잘림 유발)
+        add_crop((text_left, 0, text_right, crop_bottom))
+        add_crop((0, 0, int(width * 0.72), crop_bottom))
+
+        # 2) 어두운 배너 — 가로만 밴드에 맞추고 세로는 슬롯 전체(y1=0)
         if band is not None:
-            x1, y1, x2, y2 = band
-            add_crop((x1, max(0, y1 - 4), x2, min(height, y2 + 4)))
-            add_crop((0, max(0, y1 - 6), width, min(height, y2 + 6)))
+            x1, _y1, x2, y2 = band
+            add_crop(
+                (
+                    max(0, x1),
+                    0,
+                    min(x2, text_right),
+                    min(height, max(crop_bottom, y2 + 2)),
+                )
+            )
 
-        fixed_h = max(12, int(height * self.BANNER_OCR_FIXED_TOP_RATIO))
-        slim_h = max(10, int(height * 0.14))
-        if title_band is None:
-            add_crop((0, 0, width, fixed_h))
-            add_crop((int(width * 0.02), 0, int(width * 0.98), int(fixed_h * 0.90)))
-            add_crop((int(width * 0.04), 0, int(width * 0.96), slim_h))
-        else:
-            add_crop((int(width * 0.04), 0, int(width * 0.96), slim_h))
+        # 3) 밝은 양피지(라비린토스 등) — 밴드 미검출 시 슬롯 전체 너비
+        if band is None:
+            add_crop((0, 0, width, crop_bottom))
 
-        return crops[:6]
+        return crops[:3]
 
     def _crop_banner_region(self, image: Image.Image) -> Image.Image | None:
         """지도 창 어두운 지역명 배너만 잘라 OCR 정확도 개선"""
@@ -2190,6 +2199,137 @@ class TreasureCaptureProcessor:
         hits = sum(1 for key in cls._OVERLAY_OCR_KEYWORDS if key in compact)
         return hits >= 2
 
+    @staticmethod
+    def _extract_banner_hangul_runs(compact: str) -> list[str]:
+        """OCR 잡음 뒤에 붙은 한글을 제외하고 지역명 후보 구간만 추출"""
+        return re.findall(r"[가-힣]{3,8}", compact)
+
+    def _match_banner_text_scored_with_runs(
+        self, text: str
+    ) -> tuple[Optional[dict], float]:
+        """전체 문자열 + 연속 한글 구간 각각 매칭 시도"""
+        zone, score = self._match_banner_text_scored(text)
+        if zone is not None:
+            return zone, score
+
+        compact = re.sub(r"[\s·、．.,\-_'\"~‥…]", "", text)
+        for run in self._extract_banner_hangul_runs(compact):
+            z, s = self._match_banner_text_scored(run)
+            if z is not None and s > score:
+                zone, score = z, s
+        return zone, score
+
+    def _zone_name_lexicon(
+        self,
+    ) -> tuple[frozenset[str], str, list[tuple[dict, str]]]:
+        """zones.json name_ko 기반 한글 글자집·OCR whitelist·지역명 목록"""
+        if self._zone_lexicon is not None:
+            return self._zone_lexicon
+
+        chars: set[str] = set()
+        entries: list[tuple[dict, str]] = []
+        seen_names: set[str] = set()
+
+        for zone in self.coordinate_service.zones:
+            compact = re.sub(
+                r"[\s·、．.,\-_'\"]",
+                "",
+                str(zone.get("name_ko", "")),
+            )
+            if len(compact) < 2 or compact in seen_names:
+                continue
+            seen_names.add(compact)
+            entries.append((zone, compact))
+            chars.update(compact)
+
+        for keywords in self._SHROUD_DIRECTIONS.values():
+            for token in keywords:
+                if re.fullmatch(r"[가-힣]+", token):
+                    chars.update(token)
+
+        whitelist = "".join(sorted(chars))
+        self._zone_lexicon = (frozenset(chars), whitelist, entries)
+        return self._zone_lexicon
+
+    @staticmethod
+    def _subsequence_coverage(needle: str, haystack: str) -> float:
+        """지역명 글자가 OCR 한글열에 순서대로 포함되는 비율"""
+        if not needle:
+            return 0.0
+        idx = 0
+        for ch in haystack:
+            if idx < len(needle) and ch == needle[idx]:
+                idx += 1
+        return idx / len(needle)
+
+    @staticmethod
+    def _best_window_similarity(needle: str, haystack: str) -> float:
+        """OCR 한글열 슬라이딩 윈도우 ↔ 지역명 유사도"""
+        from difflib import SequenceMatcher
+
+        if not needle or not haystack:
+            return 0.0
+        if needle in haystack:
+            return 1.0
+
+        best = 0.0
+        n = len(needle)
+        max_w = min(len(haystack), n + 3)
+        for width in range(max(2, n - 2), max_w + 1):
+            for start in range(0, len(haystack) - width + 1):
+                window = haystack[start : start + width]
+                best = max(best, SequenceMatcher(None, needle, window).ratio())
+        return best
+
+    def _match_banner_lexicon(
+        self, ocr_ko: str
+    ) -> tuple[Optional[dict], float]:
+        """OCR 한글열을 zones.json 지역명 글자집과 대조"""
+        if len(ocr_ko) < 2:
+            return None, 0.0
+
+        _chars, _whitelist, entries = self._zone_name_lexicon()
+        best_zone: Optional[dict] = None
+        best_score = 0.0
+        second_score = 0.0
+
+        for zone, name in entries:
+            if len(name) < 2:
+                continue
+
+            if name in ocr_ko:
+                inline = min(
+                    1.0,
+                    0.78 + 0.22 * len(name) / max(len(ocr_ko), len(name)),
+                )
+            else:
+                inline = 0.0
+
+            sub = self._subsequence_coverage(name, ocr_ko)
+            win = self._best_window_similarity(name, ocr_ko)
+            score = max(inline, sub * 0.94, win * 0.90)
+
+            if score > best_score:
+                second_score = best_score
+                best_score = score
+                best_zone = zone
+            elif score > second_score:
+                second_score = score
+
+        if best_zone is None or best_score < 0.72:
+            return None, 0.0
+        if second_score > 0.0 and best_score - second_score < 0.08:
+            return None, 0.0
+
+        zone_ko = re.sub(
+            r"[\s·、．.,\-_'\"]",
+            "",
+            str(best_zone.get("name_ko", "")),
+        )
+        if abs(len(zone_ko) - len(ocr_ko)) > 6 and best_score < 0.88:
+            return None, 0.0
+        return best_zone, best_score
+
     def _match_banner_text(self, text: str) -> Optional[dict]:
         zone, _ = self._match_banner_text_scored(text)
         return zone
@@ -2230,7 +2370,13 @@ class TreasureCaptureProcessor:
         if shroud_zone is not None:
             return shroud_zone, shroud_score
 
-        korean_count = len(re.findall(r"[가-힣]", normalized))
+        ocr_ko = "".join(re.findall(r"[가-힣]", text))
+        if len(ocr_ko) >= 2:
+            lex_zone, lex_score = self._match_banner_lexicon(ocr_ko)
+            if lex_zone is not None and lex_score >= 0.72:
+                return lex_zone, lex_score
+
+        korean_count = len(ocr_ko)
         if korean_count < 3 or korean_count > 18:
             return None, 0.0
 
@@ -2255,19 +2401,19 @@ class TreasureCaptureProcessor:
             if second_score > 0.0 and best_score - second_score < 0.08:
                 return None, 0.0
             zone_ko = re.sub(r"[\s·、．.,\-_'\"]", "", str(best_zone.get("name_ko", "")))
-            ocr_ko = len(re.findall(r"[가-힣]", normalized))
-            if abs(len(zone_ko) - ocr_ko) > 5:
+            ocr_ko_count = len(re.findall(r"[가-힣]", normalized))
+            if abs(len(zone_ko) - ocr_ko_count) > 5:
                 return None, 0.0
             if len(zone_ko) <= 4 and best_score < 0.82:
                 return None, 0.0
-            if ocr_ko < 4 and best_score < 0.78:
+            if ocr_ko_count < 4 and best_score < 0.78:
                 return None, 0.0
             # 짧고 확실한 후보(길이 일치 + 높은 유사)는 0.55 허용
             if (
                 best_score < 0.72
                 and "shroud" not in str(best_zone.get("id", ""))
                 and not (
-                    abs(len(zone_ko) - ocr_ko) <= 1
+                    abs(len(zone_ko) - ocr_ko_count) <= 1
                     and best_score >= 0.58
                     and second_score < best_score - 0.10
                 )
@@ -3042,15 +3188,17 @@ class TreasureCaptureProcessor:
 
         gray_scaled = scaled.convert("L")
 
-        # (전처리 이미지, PSM 목록) — 범용(밝은 양피지) → 흰글씨(어두운 배너) 순
+        _chars, zone_whitelist, _entries = self._zone_name_lexicon()
+
+        # 흰 글씨(어두운 배너) 우선 → zones.json 글자 whitelist로 노이즈 억제
         stages: list[tuple[Image.Image, tuple[int, ...]]] = [
+            (strict_white, (7, 8)),
+            (white, (7, 8)),
             (gray_scaled, (7, 8)),
             (contrast_inv, (7,)),
             (Image.fromarray(binary), (7, 13)),
             (ink_img, (7,)),
             (deficit_img, (7,)),
-            (strict_white, (7, 8)),
-            (white, (7, 8)),
             (bright, (7,)),
             (invert, (7, 13)),
         ]
@@ -3059,7 +3207,12 @@ class TreasureCaptureProcessor:
         for img, psm_modes in stages:
             padded = ImageOps.expand(img, border=16, fill=0)
             for psm in psm_modes:
-                text = self._ocr.read_text(padded, lang="kor", psm=psm)
+                text = self._ocr.read_text(
+                    padded,
+                    lang="kor",
+                    psm=psm,
+                    whitelist=zone_whitelist or None,
+                )
                 if not text or text in seen:
                     continue
                 seen.add(text)
