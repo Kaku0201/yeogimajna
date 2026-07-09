@@ -109,13 +109,17 @@ class MapAnalyzer:
         locked_score = 0.0
         locked_text: Optional[str] = None
         best_candidate = raw
+        best_map_window: Image.Image | None = None
 
-        for candidate in candidates:
+        for idx, candidate in enumerate(candidates):
+            tight = self.capture_processor._capture_is_tight_map_frame(candidate)
+            already_extracted = candidate is not raw or tight
             refocus = (
-                not self.capture_processor._capture_is_tight_map_frame(candidate)
+                not already_extracted
+                and not tight
                 and candidate.width * candidate.height >= raw_area * 0.92
             )
-            zone, score, text = self.capture_processor.resolve_banner_zone(
+            zone, score, text, map_window = self.capture_processor.resolve_banner_zone(
                 candidate, refocus=refocus
             )
             if zone is not None and score > locked_score:
@@ -123,8 +127,12 @@ class MapAnalyzer:
                 locked_score = score
                 locked_text = text
                 best_candidate = candidate
+                if map_window is not None:
+                    best_map_window = map_window
                 if locked_score >= TreasureCaptureProcessor.BANNER_OCR_EARLY_EXIT:
                     break
+            if idx > 0 and locked_score >= 0.72:
+                break
 
         t_banner = time.perf_counter()
         logger.debug(
@@ -162,11 +170,15 @@ class MapAnalyzer:
 
         refocus_best = (
             not self.capture_processor._capture_is_tight_map_frame(best_candidate)
+            and best_candidate is raw
             and best_candidate.width * best_candidate.height >= raw_area * 0.92
         )
-        map_for_ocr = self.capture_processor.localize_for_zone_ocr(
-            best_candidate, refocus=refocus_best
-        )
+        if best_map_window is not None:
+            map_for_ocr = best_map_window
+        else:
+            map_for_ocr = self.capture_processor.localize_for_zone_ocr(
+                best_candidate, refocus=refocus_best
+            )
         working_best = (
             self.capture_processor.focus_map_window(best_candidate)
             if refocus_best
@@ -230,13 +242,13 @@ class MapAnalyzer:
 
         for candidate in candidates:
             refocus = candidate.width * candidate.height >= raw_area * 0.92
-            zone, score, text = self.capture_processor.resolve_banner_zone(
+            _zone, score, _text, _map_window = self.capture_processor.resolve_banner_zone(
                 candidate, refocus=refocus
             )
-            if zone is not None and score > best_score:
-                best_zone = zone
+            if _zone is not None and score > best_score:
+                best_zone = _zone
                 best_score = score
-                best_text = text
+                best_text = _text
                 if best_score >= TreasureCaptureProcessor.BANNER_OCR_EARLY_EXIT:
                     return best_zone, best_score, best_text
 
@@ -369,7 +381,7 @@ class MapAnalyzer:
         best_score = -1.0
         for candidate in candidates:
             refocus = candidate.width * candidate.height >= raw_area * 0.92
-            _zone, score, _text = self.capture_processor.resolve_banner_zone(
+            _zone, score, _text, _map_window = self.capture_processor.resolve_banner_zone(
                 candidate, refocus=refocus
             )
             if score > best_score:

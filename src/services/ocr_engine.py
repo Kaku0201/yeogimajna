@@ -24,6 +24,7 @@ OcrLang = Literal["kor", "eng"]
 _PSM_NAMES: dict[int, str] = {
     6: "SINGLE_BLOCK",
     7: "SINGLE_LINE",
+    8: "SINGLE_WORD",
     10: "SINGLE_CHAR",
     11: "SPARSE_TEXT",
     13: "RAW_LINE",

@@ -1978,32 +1978,77 @@ class TreasureCaptureProcessor:
         best_score = 0.0
         best_text: Optional[str] = None
 
-        for banner in self._banner_crops(image):
+        ocr_calls = 0
+        max_ocr_calls = 18
+
+        banner_crops = self._banner_crops(image)
+        if not banner_crops:
+            logger.debug(
+                "banner_ocr 크롭 없음: image=%dx%d (배너/지역명 띠 미검출)",
+                image.width,
+                image.height,
+            )
+            return best_zone, best_score, best_text
+
+        logger.debug(
+            "banner_ocr 시작: image=%dx%d crops=%d",
+            image.width,
+            image.height,
+            len(banner_crops),
+        )
+
+        for crop_idx, banner in enumerate(banner_crops):
             for text in self._ocr_banner_candidates(banner):
+                ocr_calls += 1
                 if self._is_overlay_ocr_noise(text):
+                    logger.debug("banner_ocr noise 필터됨: %r", text)
                     continue
                 compact = re.sub(r"[\s·、．.,\-_'\"]", "", text)
                 hangul_len = len(re.findall(r"[가-힣]", compact))
                 if hangul_len < 2 or hangul_len > 18:
+                    logger.debug(
+                        "banner_ocr hangul_len 필터됨(%d): %r",
+                        hangul_len,
+                        text,
+                    )
                     continue
                 zone, score = self._match_banner_text_scored(text)
+                logger.debug(
+                    "banner_ocr candidate text=%r -> zone=%s score=%.3f",
+                    text,
+                    zone.get("id") if zone else None,
+                    score,
+                )
                 if zone is not None and score > best_score:
                     best_score = score
                     best_zone = zone
                     best_text = text
-                    zone_id = str(best_zone.get("id", ""))
                     if best_score >= self.BANNER_OCR_EARLY_EXIT:
                         return best_zone, best_score, best_text
+                if best_score >= self.BANNER_OCR_EARLY_EXIT:
+                    return best_zone, best_score, best_text
+                if ocr_calls >= max_ocr_calls and best_score <= 0.0:
+                    logger.debug(
+                        "banner_ocr 조기 중단: ocr_calls=%d best_score=%.3f",
+                        ocr_calls,
+                        best_score,
+                    )
+                    return best_zone, best_score, best_text
+            if best_score >= self.BANNER_OCR_EARLY_EXIT:
+                return best_zone, best_score, best_text
+            if crop_idx >= 1 and best_score >= 0.72:
+                return best_zone, best_score, best_text
 
         return best_zone, best_score, best_text
 
     def resolve_banner_zone(
         self, image: Image.Image, *, refocus: bool = True
-    ) -> tuple[Optional[dict], float, Optional[str]]:
-        """캡처 보정 후 배너에서 지역명 우선 판별"""
+    ) -> tuple[Optional[dict], float, Optional[str], Image.Image | None]:
+        """캡처 보정 후 배너에서 지역명 우선 판별 — (zone, score, text, OCR용 map_window)"""
         best_zone: Optional[dict] = None
         best_score = 0.0
         best_text: Optional[str] = None
+        best_map_window: Image.Image | None = None
 
         attempts: list[Image.Image] = []
         if self._capture_is_tight_map_frame(image):
@@ -2011,8 +2056,6 @@ class TreasureCaptureProcessor:
         elif refocus:
             focused = self.focus_map_window(image)
             attempts.append(focused)
-            if focused.size != image.size:
-                attempts.append(image)
         else:
             attempts.append(image)
 
@@ -2029,10 +2072,13 @@ class TreasureCaptureProcessor:
                 best_zone = zone
                 best_score = score
                 best_text = text
+                best_map_window = map_window
                 if best_score >= self.BANNER_OCR_EARLY_EXIT:
                     break
+            elif best_map_window is None:
+                best_map_window = map_window
 
-        return best_zone, best_score, best_text
+        return best_zone, best_score, best_text, best_map_window
 
     def _banner_crops(self, image: Image.Image) -> list[Image.Image]:
         """배너 OCR용 크롭 후보 — 상하단 픽셀 잘림 방지 패딩"""
@@ -2073,14 +2119,15 @@ class TreasureCaptureProcessor:
             add_crop((0, max(0, y1 - 6), width, min(height, y2 + 6)))
 
         fixed_h = max(12, int(height * self.BANNER_OCR_FIXED_TOP_RATIO))
-        add_crop((0, 0, width, fixed_h))
-        add_crop((int(width * 0.02), 0, int(width * 0.98), int(fixed_h * 0.90)))
-        # 밝은 양피지 배너(라비린토스 등) — 어두운 밴드 미검출 시 상단 얇은 띠 보강
         slim_h = max(10, int(height * 0.14))
-        add_crop((int(width * 0.04), 0, int(width * 0.96), slim_h))
-        add_crop((int(width * 0.08), 0, int(width * 0.90), max(10, int(height * 0.18))))
+        if title_band is None:
+            add_crop((0, 0, width, fixed_h))
+            add_crop((int(width * 0.02), 0, int(width * 0.98), int(fixed_h * 0.90)))
+            add_crop((int(width * 0.04), 0, int(width * 0.96), slim_h))
+        else:
+            add_crop((int(width * 0.04), 0, int(width * 0.96), slim_h))
 
-        return crops
+        return crops[:6]
 
     def _crop_banner_region(self, image: Image.Image) -> Image.Image | None:
         """지도 창 어두운 지역명 배너만 잘라 OCR 정확도 개선"""
@@ -2581,76 +2628,134 @@ class TreasureCaptureProcessor:
             ", ".join(v for v, _ in ocr_images),
         )
 
-    def _ocr_party_icon(
+    def _prepare_party_digit_ocr_image(
+        self, icon: Image.Image
+    ) -> Image.Image | None:
+        """숫자 ROI만 확대 — full 아이콘 OCR보다 훨씬 빠름"""
+        gray = self._party_banner_gray(icon)
+        digit_roi = self._party_digit_roi(gray)
+        if digit_roi is None or digit_roi.size == 0:
+            return None
+        digit_img = Image.fromarray(digit_roi).convert("L")
+        digit_img = ImageOps.expand(digit_img, border=8, fill=0)
+        scale = max(6, int(96 / max(digit_roi.shape[0], digit_roi.shape[1], 1)))
+        return digit_img.resize(
+            (digit_img.width * scale, digit_img.height * scale),
+            Image.Resampling.LANCZOS,
+        )
+
+    def _ocr_party_digit_roi(
         self,
         icon: Image.Image,
         trace: PartyDetectTrace | None = None,
     ) -> int | None:
+        """숫자 ROI만 OCR — 2~4회 시도로 1/8 판별"""
         if not self._tesseract_available:
+            return None
+
+        digit = self._prepare_party_digit_ocr_image(icon)
+        if digit is None:
             return None
 
         collect_trace = trace is not None and is_debug()
         if collect_trace and trace.ocr_attempts is None:
             trace.ocr_attempts = []
 
-        targets: list[tuple[str, Image.Image]] = [("full", icon)]
-        gray = self._party_banner_gray(icon)
-        digit_roi = self._party_digit_roi(gray)
-        if digit_roi is not None and digit_roi.size > 0:
-            digit_img = Image.fromarray(digit_roi).convert("L")
-            pad = 8
-            digit_img = ImageOps.expand(digit_img, border=pad, fill=0)
-            scale = max(6, int(96 / max(digit_roi.shape[0], digit_roi.shape[1], 1)))
-            digit_scaled = digit_img.resize(
-                (digit_img.width * scale, digit_img.height * scale),
-                Image.Resampling.LANCZOS,
-            )
-            targets.append(("digit", digit_scaled))
+        digit_arr = np.array(digit)
+        attempts: list[tuple[str, Image.Image]] = [
+            ("digit", digit),
+            ("digit_inv", Image.fromarray(255 - digit_arr)),
+        ]
 
-        self._party_debug_saved = False
-        for label, base in targets:
-            scale = max(5, int(120 / max(base.width, base.height, 1)))
-            scaled = base.resize(
-                (max(60, base.width * scale), max(60, base.height * scale)),
-                Image.Resampling.LANCZOS,
-            )
-            ocr_images: list[tuple[str, Image.Image]] = [(label, scaled)]
-            gray_arr = np.array(scaled.convert("L"))
-            ocr_images.append((f"{label}_inv", Image.fromarray(255 - gray_arr)))
-            enhanced = np.array(
-                ImageEnhance.Contrast(scaled.convert("L")).enhance(2.5)
-            )
-            ocr_images.append((f"{label}_contrast", Image.fromarray(255 - enhanced)))
-
-            if label == "full":
-                self._save_party_debug_images(icon, ocr_images)
-
-            for variant, ocr_image in ocr_images:
-                for psm in (10, 7, 13):
-                    try:
-                        text = self._ocr.read_text(
-                            ocr_image,
-                            lang="eng",
-                            psm=psm,
-                            whitelist="18",
+        for variant, ocr_image in attempts:
+            for psm in (10, 7):
+                try:
+                    text = self._ocr.read_text(
+                        ocr_image,
+                        lang="eng",
+                        psm=psm,
+                        whitelist="18",
+                    )
+                    parsed = self._parse_party_digit(text)
+                    if collect_trace:
+                        trace.ocr_attempts.append(
+                            f"{variant}/psm{psm} raw={text!r} parsed={parsed}"
                         )
-                        parsed = self._parse_party_digit(text)
-                        if collect_trace:
-                            trace.ocr_attempts.append(
-                                f"{variant}/psm{psm} raw={text!r} parsed={parsed}"
-                            )
-                        if parsed is not None:
-                            if trace is not None:
-                                trace.ocr_raw = text.strip()
-                                trace.ocr_digit = parsed
-                            return parsed
-                    except Exception as exc:
-                        if collect_trace:
-                            trace.ocr_attempts.append(
-                                f"{variant}/psm{psm} error={exc!s}"
-                            )
-                        continue
+                    if parsed is not None:
+                        if trace is not None:
+                            trace.ocr_raw = text.strip()
+                            trace.ocr_digit = parsed
+                        return parsed
+                except Exception as exc:
+                    if collect_trace:
+                        trace.ocr_attempts.append(
+                            f"{variant}/psm{psm} error={exc!s}"
+                        )
         return None
+
+    def _ocr_party_icon_full(
+        self,
+        icon: Image.Image,
+        trace: PartyDetectTrace | None = None,
+    ) -> int | None:
+        """full 아이콘 OCR — digit ROI 실패 시 fallback"""
+        if not self._tesseract_available:
+            return None
+
+        collect_trace = trace is not None and is_debug()
+        scale = max(5, int(120 / max(icon.width, icon.height, 1)))
+        scaled = icon.resize(
+            (max(60, icon.width * scale), max(60, icon.height * scale)),
+            Image.Resampling.LANCZOS,
+        )
+        gray_arr = np.array(scaled.convert("L"))
+        ocr_images: list[tuple[str, Image.Image]] = [
+            ("full", scaled),
+            ("full_inv", Image.fromarray(255 - gray_arr)),
+        ]
+        enhanced = np.array(
+            ImageEnhance.Contrast(scaled.convert("L")).enhance(2.5)
+        )
+        ocr_images.append(("full_contrast", Image.fromarray(255 - enhanced)))
+        self._save_party_debug_images(icon, ocr_images)
+
+        for variant, ocr_image in ocr_images:
+            for psm in (10, 7):
+                try:
+                    text = self._ocr.read_text(
+                        ocr_image,
+                        lang="eng",
+                        psm=psm,
+                        whitelist="18",
+                    )
+                    parsed = self._parse_party_digit(text)
+                    if collect_trace and trace.ocr_attempts is not None:
+                        trace.ocr_attempts.append(
+                            f"{variant}/psm{psm} raw={text!r} parsed={parsed}"
+                        )
+                    if parsed is not None:
+                        if trace is not None:
+                            trace.ocr_raw = text.strip()
+                            trace.ocr_digit = parsed
+                        return parsed
+                except Exception as exc:
+                    if collect_trace and trace.ocr_attempts is not None:
+                        trace.ocr_attempts.append(
+                            f"{variant}/psm{psm} error={exc!s}"
+                        )
+        return None
+
+    def _ocr_party_icon(
+        self,
+        icon: Image.Image,
+        trace: PartyDetectTrace | None = None,
+    ) -> int | None:
+        """하위 호환 — digit ROI 우선, 실패 시 full 아이콘"""
+        self._party_debug_saved = False
+        result = self._ocr_party_digit_roi(icon, trace)
+        if result in (1, 8):
+            return result
+        return self._ocr_party_icon_full(icon, trace)
 
     @staticmethod
     def _party_left_bright(icon: Image.Image) -> float:
@@ -2691,13 +2796,13 @@ class TreasureCaptureProcessor:
         icon: Image.Image,
         trace: PartyDetectTrace | None = None,
     ) -> int | None:
-        """OCR → 위상(구멍) → 휴리스틱 순으로 1/8 판별"""
+        """OCR → 위상(구멍) → full OCR → 휴리스틱 순으로 1/8 판별"""
         left_bright = self._party_left_bright(icon)
         if trace is not None:
             trace.left_bright = left_bright
             trace.icon_size = icon.size
 
-        ocr = self._ocr_party_icon(icon, trace)
+        ocr = self._ocr_party_digit_roi(icon, trace)
         if ocr in (1, 8):
             if trace is not None:
                 trace.result = ocr
@@ -2715,6 +2820,13 @@ class TreasureCaptureProcessor:
                 trace.result = 1
                 trace.reason = "topology1"
             return 1
+
+        ocr_full = self._ocr_party_icon_full(icon, trace)
+        if ocr_full in (1, 8):
+            if trace is not None:
+                trace.result = ocr_full
+                trace.reason = f"ocr_full{ocr_full}"
+            return ocr_full
 
         heuristic = self._heuristic_party_digit(icon, trace)
         if trace is not None:
@@ -2861,9 +2973,14 @@ class TreasureCaptureProcessor:
         return self.detect_party_size(image, debug_source=f"{debug_source}/fallback")
 
     def _ocr_banner_candidates(self, banner: Image.Image):
-        """배너 OCR — yield로 필요한 만큼만 tesseract 호출"""
+        """배너 OCR — 고성공률 전처리·PSM부터 순차 시도 (조기 yield)"""
         if not self._ocr.available:
             return
+
+        if is_debug():
+            debug_dir = Path.cwd() / "debug_banner"
+            debug_dir.mkdir(exist_ok=True)
+            banner.save(debug_dir / f"crop_{time.time_ns()}.png")
 
         scale = max(4, int(520 / max(banner.width, 1)), int(360 / max(banner.height, 1)))
         scale = min(scale, 12)
@@ -2874,35 +2991,44 @@ class TreasureCaptureProcessor:
         rgb = np.array(scaled.convert("RGB"))
         gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
 
-        ocr_images: list[Image.Image] = []
-        # 지역명 흰 글씨 우선 (어두운 배너 배경)
-        strict_white = (
-            (rgb[:, :, 0] > 200)
-            & (rgb[:, :, 1] > 190)
-            & (rgb[:, :, 2] > 150)
+        strict_white = Image.fromarray(
+            np.where(
+                (rgb[:, :, 0] > 200)
+                & (rgb[:, :, 1] > 190)
+                & (rgb[:, :, 2] > 150),
+                0,
+                255,
+            ).astype(np.uint8)
         )
-        ocr_images.append(Image.fromarray(np.where(strict_white, 0, 255).astype(np.uint8)))
-
-        white = (rgb[:, :, 0] > 150) & (rgb[:, :, 1] > 150) & (rgb[:, :, 2] > 150)
-        ocr_images.append(Image.fromarray(np.where(white, 0, 255).astype(np.uint8)))
-        psm_modes = (7, 8, 13)
-
-        bright = (rgb[:, :, 0] > 130) & (rgb[:, :, 1] > 130) & (rgb[:, :, 2] > 130)
-        ocr_images.append(Image.fromarray(np.where(bright, 0, 255).astype(np.uint8)))
-
+        white = Image.fromarray(
+            np.where(
+                (rgb[:, :, 0] > 150)
+                & (rgb[:, :, 1] > 150)
+                & (rgb[:, :, 2] > 150),
+                0,
+                255,
+            ).astype(np.uint8)
+        )
+        bright = Image.fromarray(
+            np.where(
+                (rgb[:, :, 0] > 130)
+                & (rgb[:, :, 1] > 130)
+                & (rgb[:, :, 2] > 130),
+                0,
+                255,
+            ).astype(np.uint8)
+        )
         enhanced = np.array(ImageEnhance.Contrast(scaled.convert("L")).enhance(2.5))
-        ocr_images.append(Image.fromarray(255 - enhanced))
-
-        ocr_images.append(ImageOps.invert(scaled.convert("L")))
+        contrast_inv = Image.fromarray(255 - enhanced)
+        invert = ImageOps.invert(scaled.convert("L"))
 
         blur = cv2.GaussianBlur(gray, (3, 3), 0)
         _, binary = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        ocr_images.append(Image.fromarray(binary))
 
         bg = cv2.GaussianBlur(gray, (0, 0), 5)
         diff = cv2.subtract(bg, gray)
         _, ink = cv2.threshold(diff, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        ocr_images.append(Image.fromarray(np.where(ink > 0, 0, 255).astype(np.uint8)))
+        ink_img = Image.fromarray(np.where(ink > 0, 0, 255).astype(np.uint8))
 
         deficit = (
             (rgb[:, :, 0].astype(np.int16) + rgb[:, :, 1].astype(np.int16)) // 2
@@ -2910,10 +3036,25 @@ class TreasureCaptureProcessor:
         )
         deficit = np.clip(deficit, 0, 255).astype(np.uint8)
         _, dbin = cv2.threshold(deficit, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        ocr_images.append(Image.fromarray(np.where(dbin > 0, 0, 255).astype(np.uint8)))
+        deficit_img = Image.fromarray(np.where(dbin > 0, 0, 255).astype(np.uint8))
+
+        gray_scaled = scaled.convert("L")
+
+        # (전처리 이미지, PSM 목록) — 범용(밝은 양피지) → 흰글씨(어두운 배너) 순
+        stages: list[tuple[Image.Image, tuple[int, ...]]] = [
+            (gray_scaled, (7, 8)),
+            (contrast_inv, (7,)),
+            (Image.fromarray(binary), (7, 13)),
+            (ink_img, (7,)),
+            (deficit_img, (7,)),
+            (strict_white, (7, 8)),
+            (white, (7, 8)),
+            (bright, (7,)),
+            (invert, (7, 13)),
+        ]
 
         seen: set[str] = set()
-        for img in ocr_images:
+        for img, psm_modes in stages:
             padded = ImageOps.expand(img, border=16, fill=0)
             for psm in psm_modes:
                 text = self._ocr.read_text(padded, lang="kor", psm=psm)
@@ -3025,7 +3166,7 @@ class TreasureCaptureProcessor:
     MATCH_CENTER_Y_RATIO = 0.44
     MATCH_EDGE_WEIGHT = 0.58
     MATCH_RADIAL_SIGMA = 0.58
-    BANNER_OCR_EARLY_EXIT = 0.85
+    BANNER_OCR_EARLY_EXIT = 0.80
 
     @classmethod
     def prepare_matching_patch(
