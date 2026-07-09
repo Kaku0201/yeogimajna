@@ -2536,7 +2536,8 @@ class TreasureCaptureProcessor:
         if trace is not None:
             trace.left_bright = left_bright
         if holes == 0:
-            return 1
+            # 구멍 0만으로 1 확정하지 않음 — 잘린 ROI·노이즈에서 8이 1로 오판됨
+            return None
         if holes >= 1 and self._confirm_topology_eight(left_bright, holes):
             return 8
         if holes >= 1 and is_debug():
@@ -2549,11 +2550,11 @@ class TreasureCaptureProcessor:
 
     @staticmethod
     def _confirm_topology_eight(left_bright: float, holes: int) -> bool:
-        """8 판정 — 구멍만으로는 부족, 그룹 아이콘 밝기도 함께 확인"""
+        """8 판정 — 8은 위 구멍(holes≥1)이 핵심, 사람 아이콘 밝기는 보조"""
         if holes >= 2:
-            return left_bright >= 0.08
+            return True
         if holes == 1:
-            return left_bright >= 0.17
+            return left_bright >= 0.04
         return False
 
     def _save_party_debug_images(
@@ -2588,48 +2589,67 @@ class TreasureCaptureProcessor:
         if not self._tesseract_available:
             return None
 
-        scale = max(5, int(120 / max(icon.width, icon.height, 1)))
-        base = icon.resize(
-            (max(60, icon.width * scale), max(60, icon.height * scale)),
-            Image.Resampling.LANCZOS,
-        )
-        ocr_images: list[tuple[str, Image.Image]] = [("base", base)]
-        gray = np.array(base.convert("L"))
-        ocr_images.append(("invert", Image.fromarray(255 - gray)))
-        enhanced = np.array(ImageEnhance.Contrast(base.convert("L")).enhance(2.5))
-        ocr_images.append(("contrast", Image.fromarray(255 - enhanced)))
-
-        self._save_party_debug_images(icon, ocr_images)
-
         collect_trace = trace is not None and is_debug()
         if collect_trace and trace.ocr_attempts is None:
             trace.ocr_attempts = []
 
-        for variant, ocr_image in ocr_images:
-            for psm in (10, 7, 13):
-                try:
-                    text = self._ocr.read_text(
-                        ocr_image,
-                        lang="eng",
-                        psm=psm,
-                        whitelist="18",
-                    )
-                    parsed = self._parse_party_digit(text)
-                    if collect_trace:
-                        trace.ocr_attempts.append(
-                            f"{variant}/psm{psm} raw={text!r} parsed={parsed}"
+        targets: list[tuple[str, Image.Image]] = [("full", icon)]
+        gray = self._party_banner_gray(icon)
+        digit_roi = self._party_digit_roi(gray)
+        if digit_roi is not None and digit_roi.size > 0:
+            digit_img = Image.fromarray(digit_roi).convert("L")
+            pad = 8
+            digit_img = ImageOps.expand(digit_img, border=pad, fill=0)
+            scale = max(6, int(96 / max(digit_roi.shape[0], digit_roi.shape[1], 1)))
+            digit_scaled = digit_img.resize(
+                (digit_img.width * scale, digit_img.height * scale),
+                Image.Resampling.LANCZOS,
+            )
+            targets.append(("digit", digit_scaled))
+
+        self._party_debug_saved = False
+        for label, base in targets:
+            scale = max(5, int(120 / max(base.width, base.height, 1)))
+            scaled = base.resize(
+                (max(60, base.width * scale), max(60, base.height * scale)),
+                Image.Resampling.LANCZOS,
+            )
+            ocr_images: list[tuple[str, Image.Image]] = [(label, scaled)]
+            gray_arr = np.array(scaled.convert("L"))
+            ocr_images.append((f"{label}_inv", Image.fromarray(255 - gray_arr)))
+            enhanced = np.array(
+                ImageEnhance.Contrast(scaled.convert("L")).enhance(2.5)
+            )
+            ocr_images.append((f"{label}_contrast", Image.fromarray(255 - enhanced)))
+
+            if label == "full":
+                self._save_party_debug_images(icon, ocr_images)
+
+            for variant, ocr_image in ocr_images:
+                for psm in (10, 7, 13):
+                    try:
+                        text = self._ocr.read_text(
+                            ocr_image,
+                            lang="eng",
+                            psm=psm,
+                            whitelist="18",
                         )
-                    if parsed is not None:
-                        if trace is not None:
-                            trace.ocr_raw = text.strip()
-                            trace.ocr_digit = parsed
-                        return parsed
-                except Exception as exc:
-                    if collect_trace:
-                        trace.ocr_attempts.append(
-                            f"{variant}/psm{psm} error={exc!s}"
-                        )
-                    continue
+                        parsed = self._parse_party_digit(text)
+                        if collect_trace:
+                            trace.ocr_attempts.append(
+                                f"{variant}/psm{psm} raw={text!r} parsed={parsed}"
+                            )
+                        if parsed is not None:
+                            if trace is not None:
+                                trace.ocr_raw = text.strip()
+                                trace.ocr_digit = parsed
+                            return parsed
+                    except Exception as exc:
+                        if collect_trace:
+                            trace.ocr_attempts.append(
+                                f"{variant}/psm{psm} error={exc!s}"
+                            )
+                        continue
         return None
 
     @staticmethod
@@ -2664,9 +2684,6 @@ class TreasureCaptureProcessor:
 
         if left_bright >= 0.12:
             return 8
-        # 숫자만 희미하고 사람 아이콘이 약한 경우 — 구멍/OCR 실패 시 보수적으로 1
-        if right_ratio > 0.025 and left_bright < 0.05:
-            return 1
         return None
 
     def _resolve_party_digit(
@@ -2674,18 +2691,11 @@ class TreasureCaptureProcessor:
         icon: Image.Image,
         trace: PartyDetectTrace | None = None,
     ) -> int | None:
-        """위상(구멍) → OCR → 휴리스틱 순으로 1/8 판별"""
+        """OCR → 위상(구멍) → 휴리스틱 순으로 1/8 판별"""
         left_bright = self._party_left_bright(icon)
         if trace is not None:
             trace.left_bright = left_bright
             trace.icon_size = icon.size
-
-        topology = self._topology_party_digit(icon, trace)
-        if topology in (1, 8):
-            if trace is not None:
-                trace.result = topology
-                trace.reason = f"topology{topology}"
-            return topology
 
         ocr = self._ocr_party_icon(icon, trace)
         if ocr in (1, 8):
@@ -2693,6 +2703,18 @@ class TreasureCaptureProcessor:
                 trace.result = ocr
                 trace.reason = f"ocr{ocr}"
             return ocr
+
+        topology = self._topology_party_digit(icon, trace)
+        if topology == 8:
+            if trace is not None:
+                trace.result = 8
+                trace.reason = "topology8"
+            return 8
+        if topology == 1:
+            if trace is not None:
+                trace.result = 1
+                trace.reason = "topology1"
+            return 1
 
         heuristic = self._heuristic_party_digit(icon, trace)
         if trace is not None:
@@ -2703,6 +2725,16 @@ class TreasureCaptureProcessor:
                 trace.result = heuristic
                 trace.reason = "heuristic_only"
             return heuristic
+
+        # 마지막 — digit ROI 밝기만으로 1 추정 (8은 OCR/구멍에서 잡혀야 함)
+        _left, right_ratio = self._party_icon_metrics(icon)
+        if trace is not None:
+            trace.right_ratio = right_ratio
+        if right_ratio > 0.04 and right_ratio < 0.22:
+            if trace is not None:
+                trace.result = 1
+                trace.reason = "digit_bright_solo"
+            return 1
 
         if trace is not None:
             trace.result = None
@@ -2726,11 +2758,11 @@ class TreasureCaptureProcessor:
             px1, _py1, px2, py2 = parchment
             parch_w = max(1, px2 - px1)
             parch_h = max(1, py2 - parchment[1])
-            icon_h = max(22, int(parch_h * 0.28))
-            icon_w = max(56, int(parch_w * 0.48))
+            icon_h = max(24, int(parch_h * 0.32))
+            # 양피지 좌하단 전체 — 사람 아이콘 + 숫자(8)까지 포함
             x1 = max(0, px1 - 2)
             y1 = max(0, py2 - icon_h)
-            x2 = min(width, x1 + icon_w)
+            x2 = min(width, px2 + 4)
             y2 = min(height, py2 + 4)
             if x2 - x1 >= 30 and y2 - y1 >= 18:
                 box = (x1, y1, x2, y2)
@@ -2814,12 +2846,12 @@ class TreasureCaptureProcessor:
                 results.append((parsed, trace))
 
         if results:
-            ones = [item for item in results if item[0] == 1]
             eights = [item for item in results if item[0] == 8]
-            if len(ones) >= len(eights) and ones:
-                parsed, trace = ones[0]
-            elif eights:
+            ones = [item for item in results if item[0] == 1]
+            if eights:
                 parsed, trace = eights[0]
+            elif ones:
+                parsed, trace = ones[0]
             else:
                 parsed, trace = results[0]
             self._last_party_trace = trace
