@@ -79,6 +79,8 @@ class MapAnalyzer:
         rect: tuple[int, int, int, int],
         manual_zone: Optional[str] = None,
         manual_coords: Optional[tuple[float, float]] = None,
+        *,
+        trust_frame: bool = True,
     ) -> RecognitionResult:
         t_start = time.perf_counter()
         raw = self.capture_region(rect)
@@ -100,50 +102,63 @@ class MapAnalyzer:
                 "프로그램을 다시 실행해 지도 데이터 설치를 완료하세요."
             )
 
-        candidates = list(self.capture_processor.extract_map_candidates(raw))
-        t_candidates = time.perf_counter()
-        raw_area = raw.width * raw.height
-
-        # 1) 지역명 OCR (후보 중 최고 점수)
+        # 1) 지역명 OCR — recognition_box 확정 캡처는 고정 슬롯(trust_frame)만 사용
         locked_zone: Optional[dict] = None
         locked_score = 0.0
         locked_text: Optional[str] = None
         best_candidate = raw
-        best_map_window: Image.Image | None = None
+        best_map_window: Image.Image | None = raw
 
-        for idx, candidate in enumerate(candidates):
-            tight = self.capture_processor._capture_is_tight_map_frame(candidate)
-            already_extracted = candidate is not raw or tight
-            refocus = (
-                not already_extracted
-                and not tight
-                and candidate.width * candidate.height >= raw_area * 0.92
+        if trust_frame:
+            locked_zone, locked_score, locked_text, best_map_window = (
+                self.capture_processor.resolve_banner_zone(
+                    raw, refocus=False, trust_frame=True
+                )
             )
-            zone, score, text, map_window = self.capture_processor.resolve_banner_zone(
-                candidate, refocus=refocus
-            )
-            if zone is not None and score > locked_score:
-                locked_zone = zone
-                locked_score = score
-                locked_text = text
-                best_candidate = candidate
-                if map_window is not None:
-                    best_map_window = map_window
-                if locked_score >= TreasureCaptureProcessor.BANNER_OCR_EARLY_EXIT:
+            if best_map_window is None:
+                best_map_window = raw
+            t_candidates = t_capture
+        else:
+            candidates = list(self.capture_processor.extract_map_candidates(raw))
+            t_candidates = time.perf_counter()
+            raw_area = raw.width * raw.height
+            best_map_window = None
+
+            for idx, candidate in enumerate(candidates):
+                tight = self.capture_processor._capture_is_tight_map_frame(candidate)
+                already_extracted = candidate is not raw or tight
+                refocus = (
+                    not already_extracted
+                    and not tight
+                    and candidate.width * candidate.height >= raw_area * 0.92
+                )
+                zone, score, text, map_window = (
+                    self.capture_processor.resolve_banner_zone(
+                        candidate, refocus=refocus
+                    )
+                )
+                if zone is not None and score > locked_score:
+                    locked_zone = zone
+                    locked_score = score
+                    locked_text = text
+                    best_candidate = candidate
+                    if map_window is not None:
+                        best_map_window = map_window
+                    if locked_score >= TreasureCaptureProcessor.BANNER_OCR_EARLY_EXIT:
+                        break
+                if idx > 0 and locked_score >= 0.72:
                     break
-            if idx > 0 and locked_score >= 0.72:
-                break
 
         t_banner = time.perf_counter()
         logger.debug(
-            "timing[analyze] capture=%.1fms candidates=%.1fms(n=%d) banner_ocr=%.1fms "
-            "locked_zone=%s locked_score=%.3f",
+            "timing[analyze] capture=%.1fms candidates=%.1fms banner_ocr=%.1fms "
+            "locked_zone=%s locked_score=%.3f trust_frame=%s",
             (t_capture - t_start) * 1000,
             (t_candidates - t_capture) * 1000,
-            len(candidates),
             (t_banner - t_candidates) * 1000,
             locked_zone.get("id") if locked_zone else None,
             locked_score,
+            trust_frame,
         )
 
         if locked_zone is None or locked_score < self.BANNER_MIN_SCORE:
@@ -168,26 +183,33 @@ class MapAnalyzer:
                 "• 상단 지역명·빨간 X·하단 1/8 아이콘이 선명하게 보이는지 확인해 주세요"
             )
 
-        refocus_best = (
-            not self.capture_processor._capture_is_tight_map_frame(best_candidate)
-            and best_candidate is raw
-            and best_candidate.width * best_candidate.height >= raw_area * 0.92
-        )
-        if best_map_window is not None:
-            map_for_ocr = best_map_window
+        if trust_frame:
+            map_for_match = best_map_window or raw
+            map_for_ocr = map_for_match
         else:
-            map_for_ocr = self.capture_processor.localize_for_zone_ocr(
-                best_candidate, refocus=refocus_best
+            raw_area = raw.width * raw.height
+            refocus_best = (
+                not self.capture_processor._capture_is_tight_map_frame(best_candidate)
+                and best_candidate is raw
+                and best_candidate.width * best_candidate.height >= raw_area * 0.92
             )
-        working_best = (
-            self.capture_processor.focus_map_window(best_candidate)
-            if refocus_best
-            else best_candidate
-        )
-        map_for_match = self.capture_processor._refine_map_window_crop(
-            working_best, map_for_ocr
-        )
-        map_for_match = self.capture_processor._trim_map_window_margins(map_for_match)
+            if best_map_window is not None:
+                map_for_ocr = best_map_window
+            else:
+                map_for_ocr = self.capture_processor.localize_for_zone_ocr(
+                    best_candidate, refocus=refocus_best
+                )
+            working_best = (
+                self.capture_processor.focus_map_window(best_candidate)
+                if refocus_best
+                else best_candidate
+            )
+            map_for_match = self.capture_processor._refine_map_window_crop(
+                working_best, map_for_ocr
+            )
+            map_for_match = self.capture_processor._trim_map_window_margins(
+                map_for_match
+            )
 
         # 2) 파티 인원
         party_size, party_uncertain = self._resolve_party_size(
@@ -213,6 +235,7 @@ class MapAnalyzer:
             locked_map_window=map_for_match,
             strict_quality=False,
             refocus=False,
+            trust_frame=trust_frame,
         )
         t_end = time.perf_counter()
         logger.debug(
@@ -270,7 +293,10 @@ class MapAnalyzer:
         if locked_map_window is not None and locked_zone is not None:
             map_window = locked_map_window
             zone_hint = locked_zone
-            map_window = self.capture_processor._strip_rows_above_banner(map_window)
+            if not trust_frame:
+                map_window = self.capture_processor._strip_rows_above_banner(
+                    map_window
+                )
             focused = self.capture_processor.extract_map_content(map_window)
         else:
             focused, zone_hint, map_window = self.capture_processor.prepare(

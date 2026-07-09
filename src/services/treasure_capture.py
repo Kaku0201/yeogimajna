@@ -182,7 +182,11 @@ class TreasureCaptureProcessor:
                 map_window.width,
                 map_window.height,
             )
-            zone = None if skip_banner_ocr else self.detect_zone_from_banner(map_window)
+            zone = (
+                None
+                if skip_banner_ocr
+                else self.detect_zone_from_banner(map_window, trust_frame=True)
+            )
             focused = self.extract_map_content(map_window)
             return focused, zone, map_window
 
@@ -203,7 +207,7 @@ class TreasureCaptureProcessor:
     def localize_for_zone_ocr(
         self, image: Image.Image, *, refocus: bool = True
     ) -> Image.Image:
-        """지역명 OCR 전용 — 배너를 자르지 않고 양피지 창만 추출"""
+        """지역명 OCR 전용 — 양피지 창 추출 후 배너가 상단에 오도록 정렬"""
         working = image
         if refocus and not self._capture_is_tight_map_frame(image):
             working = self.focus_map_window(image)
@@ -212,7 +216,10 @@ class TreasureCaptureProcessor:
             return working
 
         map_window = self.locate_treasure_map_window(working)
-        return map_window
+        map_window = self._refine_map_window_crop(working, map_window)
+        map_window = self._trim_map_window_margins(map_window)
+        map_window = self._strip_rows_above_banner(map_window)
+        return self._align_map_window_to_title(map_window)
 
     def _capture_is_tight_map_frame(self, image: Image.Image) -> bool:
         """사용자가 프레임에 맞춘 캡처 — refocus/locate가 배너를 자를 수 있음"""
@@ -251,38 +258,96 @@ class TreasureCaptureProcessor:
             return image
         return cropped
 
+    @staticmethod
+    def _shrink_title_run(
+        run: list[tuple[int, int, int, int, float]],
+        *,
+        max_rows: int,
+    ) -> list[tuple[int, int, int, int, float]]:
+        """긴 밝음 런에서 지역명에 해당하는 얇은 구간만 남김"""
+        if len(run) <= max_rows:
+            return run
+        best = run
+        best_score = -1.0
+        for start in range(0, len(run) - max_rows + 1):
+            window = run[start : start + max_rows]
+            score = float(sum(r[3] for r in window)) / len(window)
+            if score > best_score:
+                best_score = score
+                best = window
+        return best
+
     def _find_title_text_band(
-        self, rgb: np.ndarray
+        self,
+        rgb: np.ndarray,
+        *,
+        marker: tuple[float, float] | None = None,
     ) -> tuple[int, int, int, int] | None:
         """상단 흰 글씨 지역명 띠 — UI 슬롯(가로 전체 밝음)과 구분"""
         height, width = rgb.shape[:2]
         if height < 30 or width < 40:
             return None
 
-        scan_end = max(24, int(height * 0.38))
-        row_infos: list[tuple[int, int, int, int, float]] = []
+        if marker is None:
+            marker = self._find_treasure_x_marker(rgb)
+        if marker is not None:
+            # X 위쪽까지 스캔 — 여백이 큰 캡처에서 지역명이 22% 슬롯 아래에 있어도 잡음
+            scan_end = min(
+                height,
+                max(24, int(marker[1]) - max(8, int(height * 0.04))),
+            )
+            max_y1_ratio = 0.46
+        else:
+            scan_end = max(24, int(height * 0.45))
+            max_y1_ratio = 0.32
 
-        for y in range(scan_end):
-            row = rgb[y]
+        row_infos: list[tuple[int, int, int, int, float]] = []
+        left_w = max(40, int(width * 0.62))
+
+        def _append_row_info(y: int, row: np.ndarray, *, dark_bonus: float = 0.0) -> None:
             white = (
-                (row[:, 0] > 200)
-                & (row[:, 1] > 190)
-                & (row[:, 2] > 155)
+                (row[:, 0] > 165)
+                & (row[:, 1] > 155)
+                & (row[:, 2] > 125)
             )
             xs = np.where(white)[0]
             count = int(xs.size)
-            if count < 18 or count > 160:
-                continue
+            if count < 12 or count > 200:
+                return
             span = (int(xs.max()) - int(xs.min()) + 1) / max(width, 1)
-            if span < 0.10 or span > 0.50:
-                continue
-            score = min(count, 90) * span
+            if span < 0.08 or span > 0.58:
+                return
+            score = min(count, 90) * span + dark_bonus
             row_infos.append((y, int(xs.min()), int(xs.max()) + 1, count, score))
+
+        for y in range(scan_end):
+            row = rgb[y, :left_w]
+            _append_row_info(y, row)
+            # 어두운 배너(커르다스 등) — 배경이 어두운 행의 흰 글씨 가중
+            full_row = rgb[y]
+            dark_ratio = float(
+                (
+                    (full_row[:, 0] < 105)
+                    & (full_row[:, 1] < 98)
+                    & (full_row[:, 2] < 92)
+                ).mean()
+            )
+            if dark_ratio >= 0.18:
+                _append_row_info(y, row, dark_bonus=18.0)
+
+        if row_infos:
+            merged: dict[int, tuple[int, int, int, int, float]] = {}
+            for info in row_infos:
+                y = info[0]
+                if y not in merged or merged[y][4] < info[4]:
+                    merged[y] = info
+            row_infos = sorted(merged.values(), key=lambda item: item[0])
 
         if not row_infos:
             return None
 
         best: tuple[int, int, int, int, float] | None = None
+        candidates: list[tuple[int, int, int, int, float]] = []
         idx = 0
         while idx < len(row_infos):
             start = row_infos[idx]
@@ -293,6 +358,9 @@ class TreasureCaptureProcessor:
             if len(run) < 3:
                 idx = j
                 continue
+            max_rows = max(8, min(18, int(height * 0.07)))
+            if len(run) > max_rows:
+                run = self._shrink_title_run(run, max_rows=max_rows)
             y1 = run[0][0]
             y2 = run[-1][0] + 1
             x1 = min(r[1] for r in run)
@@ -304,30 +372,137 @@ class TreasureCaptureProcessor:
             count_score = min(mean_count, 72.0) * 0.18
             pos_bonus = 6.0 if y1 >= int(height * 0.12) else 0.0
             score = span_score + count_score + len(run) * 0.35 + pos_bonus
+            if marker is not None:
+                ideal_y = marker[1] * 0.62
+                band_mid = (y1 + y2) / 2.0
+                score -= abs(band_mid - ideal_y) * 0.12
+                # 가이드 오버레이·상단 UI(지역명 권장 라벨) 구간은 배제
+                if y1 < int(marker[1] * 0.42):
+                    score *= 0.35
+                elif y1 >= int(height * 0.30):
+                    score += 8.0
             if mean_span > 0.44:
-                score *= 0.55
-            if y1 > height * 0.30:
+                score *= 0.55 if mean_count < 80 else 0.85
+            if y1 > height * max_y1_ratio:
                 idx = j
                 continue
-            if best is None or score > best[4]:
-                best = (x1, y1, x2, y2, score)
+            candidates.append((x1, y1, x2, y2, score))
             idx = j
+
+        if not candidates:
+            return None
+
+        # 상단 실제 배너가 있으면 양피지 지도 텍스처(아래쪽 밝음 런)보다 우선
+        upper_cut = int(height * 0.26)
+        upper_clusters = [c for c in candidates if c[1] < upper_cut]
+        if upper_clusters:
+            upper_clusters.sort(key=lambda item: item[4], reverse=True)
+            if upper_clusters[0][4] >= 8.0:
+                best = upper_clusters[0]
+        if best is None:
+            candidates.sort(key=lambda item: item[4], reverse=True)
+            best = candidates[0]
 
         if best is None:
             return None
         x1, y1, x2, y2 = best[0], best[1], best[2], best[3]
-        pad_x = max(4, int(width * 0.04))
-        # 위·아래 패딩 — 글자 획이 잘리면 OCR이 깨짐
-        # (안티에일리어싱된 획 끝부분은 흰 픽셀 수가 적어 band 탐지에서 누락되기 쉬움 —
-        #  아래쪽과 동일하게 넉넉히 잡아 ㄹ 등의 위쪽 삐침이 잘리지 않도록 함)
-        pad_top = max(8, int(height * 0.045))
-        pad_bottom = max(6, int(height * 0.035))
+        if not self._is_plausible_title_band(
+            rgb, (x1, y1, x2, y2), marker=marker
+        ):
+            return None
+        # 안티에일리어싱·금색 배너는 하단 획이 탐지 행보다 아래까지 내려감
+        y2 = self._extend_title_band_bottom(rgb, x1, y1, x2, y2)
+        pad_x = max(6, int(width * 0.05))
+        pad_top = max(10, int(height * 0.05))
+        pad_bottom = max(12, int(height * 0.065))
+        min_title_w = max(120, int(width * 0.36))
+        if x2 - x1 < min_title_w:
+            x2 = min(width, x1 + min_title_w)
         return (
             max(0, x1 - pad_x),
             max(0, y1 - pad_top),
             min(width, x2 + pad_x),
             min(height, y2 + pad_bottom),
         )
+
+    def _extend_title_band_bottom(
+        self,
+        rgb: np.ndarray,
+        x1: int,
+        y1: int,
+        x2: int,
+        y2: int,
+    ) -> int:
+        """흰 글씨 띠 하단 — 약한 획(금색 배너 그림자)까지 포함"""
+        height, width = rgb.shape[:2]
+        scan_end = min(height, y2 + max(12, int(height * 0.07)))
+        cx1 = max(0, x1)
+        cx2 = min(width, x2)
+        extended = y2
+        for y in range(y2, scan_end):
+            row = rgb[y, cx1:cx2]
+            if row.size == 0:
+                break
+            white = (
+                (row[:, 0] > 145)
+                & (row[:, 1] > 135)
+                & (row[:, 2] > 110)
+            )
+            deficit = (
+                (row[:, 0].astype(np.int16) + row[:, 1].astype(np.int16)) // 2
+                - row[:, 2].astype(np.int16)
+            )
+            ink = white | (deficit > 18)
+            if int(ink.sum()) >= 6:
+                extended = y + 1
+            elif y > y2 + 2:
+                break
+        return extended
+
+    def _is_plausible_title_band(
+        self,
+        rgb: np.ndarray,
+        band: tuple[int, int, int, int],
+        *,
+        marker: tuple[float, float] | None,
+    ) -> bool:
+        """title_band가 지역명 배너인지 — 양피지·지도 텍스처 오탐 제외"""
+        height = rgb.shape[0]
+        y1, y2 = band[1], band[3]
+        band_h = y2 - y1
+        if band_h < 10:
+            return False
+        if y2 > int(height * 0.38):
+            return False
+        if marker is not None and y2 > int(marker[1] * 0.68):
+            return False
+        return self._band_has_title_ink(rgb, band)
+
+    def _band_has_title_ink(
+        self, rgb: np.ndarray, band: tuple[int, int, int, int]
+    ) -> bool:
+        """어두운 배너 후보 안에 실제 지역명 글자(밝은 획)가 있는지"""
+        x1, y1, x2, y2 = band
+        height, width = rgb.shape[:2]
+        x1 = max(0, min(x1, width - 1))
+        y1 = max(0, min(y1, height - 1))
+        x2 = max(x1 + 1, min(x2, width))
+        y2 = max(y1 + 1, min(y2, height))
+        patch = rgb[y1:y2, x1 : min(x2, x1 + int((x2 - x1) * 0.72))]
+        if patch.size == 0:
+            return False
+        white = (
+            (patch[:, :, 0] > 165)
+            & (patch[:, :, 1] > 155)
+            & (patch[:, :, 2] > 125)
+        )
+        if float(white.mean()) >= 0.012:
+            return True
+        deficit = (
+            (patch[:, :, 0].astype(np.int16) + patch[:, :, 1].astype(np.int16)) // 2
+            - patch[:, :, 2].astype(np.int16)
+        )
+        return float((deficit > 22).mean()) >= 0.016
 
     def focus_map_window(self, image: Image.Image) -> Image.Image:
         """[고정 규격 최적화] 사용자가 고정 틀에 맞춰 배치한 이미지를 완벽한 규격으로 가공"""
@@ -364,6 +539,7 @@ class TreasureCaptureProcessor:
             )
 
         banner_target_zone = self.fixed_banner_target_zone(width, height)
+        ocr_slot = self.fixed_slot_banner_ocr_box(width, height)
         if not bare_capture and self._slot_has_guide_overlay_tint(
             rgb, banner_target_zone
         ):
@@ -378,18 +554,13 @@ class TreasureCaptureProcessor:
         has_party_icon = False
         banner_zone: tuple[int, int, int, int] | None = None
         suggested: tuple[int, int, int, int] | None = None
-        band: tuple[int, int, int, int] | None = None
 
         if has_marker and marker is not None:
-            band = self._find_banner_band_bounds(rgb, marker=marker)
-            has_banner = self._banner_above_marker(rgb, marker, band)
-            if has_banner and not self._top_header_has_title_ink(rgb):
-                has_banner = False
-            if has_banner and band is not None:
-                banner_zone = band
-                has_banner_aligned = self._band_overlaps_slot(
-                    band, banner_target_zone, min_slot_coverage=0.15
-                )
+            ink_in_slot = self._region_has_title_ink(rgb, ocr_slot)
+            ink_in_header = self._top_header_has_title_ink(rgb)
+            has_banner = ink_in_slot or ink_in_header
+            has_banner_aligned = ink_in_slot
+            banner_zone = ocr_slot if ink_in_slot else banner_target_zone
             suggested = (0, 0, width, height)
             has_party_icon = self._detect_party_icon_pattern(rgb)
 
@@ -666,28 +837,41 @@ class TreasureCaptureProcessor:
         return (y2 - y1) >= 6
 
     @classmethod
-    def _top_header_has_title_ink(cls, rgb: np.ndarray) -> bool:
-        """상단 배너 슬롯에 글자(밝은 획)가 실제로 있는지 — 잘림 감지용"""
+    def _region_has_title_ink(
+        cls, rgb: np.ndarray, box: tuple[int, int, int, int]
+    ) -> bool:
+        """지정 영역에 지역명 글자(밝은/갈색 획)가 있는지"""
         height, width = rgb.shape[:2]
-        top_h = max(12, int(height * cls.TEMPLATE_BANNER_HEIGHT_RATIO))
-        top = rgb[:top_h, : max(8, int(width * 0.88))]
-        if top.size == 0:
+        x1, y1, x2, y2 = box
+        x1 = max(0, min(x1, width - 1))
+        y1 = max(0, min(y1, height - 1))
+        x2 = max(x1 + 8, min(x2, width))
+        y2 = max(y1 + 6, min(y2, height))
+        strip = rgb[y1:y2, x1:x2]
+        if strip.size == 0:
             return False
 
         white = (
-            (top[:, :, 0] > 165)
-            & (top[:, :, 1] > 155)
-            & (top[:, :, 2] > 125)
+            (strip[:, :, 0] > 165)
+            & (strip[:, :, 1] > 155)
+            & (strip[:, :, 2] > 125)
         )
         if float(white.mean()) >= 0.010:
             return True
 
         deficit = (
-            (top[:, :, 0].astype(np.int16) + top[:, :, 1].astype(np.int16)) // 2
-            - top[:, :, 2].astype(np.int16)
+            (strip[:, :, 0].astype(np.int16) + strip[:, :, 1].astype(np.int16)) // 2
+            - strip[:, :, 2].astype(np.int16)
         )
         ink = white | (deficit > 22)
         return float(ink.mean()) >= 0.014
+
+    @classmethod
+    def _top_header_has_title_ink(cls, rgb: np.ndarray) -> bool:
+        """상단 배너 슬롯에 글자(밝은 획)가 실제로 있는지 — 잘림 감지용"""
+        height, width = rgb.shape[:2]
+        top_h = max(12, int(height * cls.TEMPLATE_BANNER_HEIGHT_RATIO))
+        return cls._region_has_title_ink(rgb, (0, 0, max(8, int(width * 0.88)), top_h))
 
     def _banner_above_marker(
         self,
@@ -982,9 +1166,9 @@ class TreasureCaptureProcessor:
         if not has_marker:
             return "빨간 X 마커가 박스 안에 보이도록 맞춰주세요"
         if not has_banner:
-            return "지역명 배너(상단 검은 띠)가 프레임 안에 보이도록 맞춰주세요"
+            return "노란 칸에 지역명이 보이도록 맞춰주세요"
         if ready and not has_banner_aligned:
-            return "✓ 캡처 가능 — 지역명을 노란 칸 근처에 두면 OCR이 더 잘 됩니다"
+            return "✓ 캡처 가능 — 지역명을 노란 칸 안에 맞추면 더 잘 됩니다"
         if ready and not has_party_icon:
             return "✓ 캡처 가능 — 하단 1/8 아이콘까지 넣으면 더 좋아요"
         if ready:
@@ -1537,7 +1721,15 @@ class TreasureCaptureProcessor:
         if height < 40:
             return image
 
-        band = self._find_banner_band_bounds(rgb)
+        marker = self._find_treasure_x_marker(rgb)
+        title_band = self._find_title_text_band(rgb, marker=marker)
+        if title_band is not None:
+            _x1, y1, _x2, _y2 = title_band
+            if 4 < y1 < height - 40:
+                top = max(0, y1 - 2)
+                return image.crop((0, top, width, height))
+
+        band = self._find_banner_band_bounds(rgb, marker=marker)
         if band is not None and (band[3] - band[1]) >= 8 and band[1] > 4:
             top = max(0, band[1] - 1)
             if top >= height - 40:
@@ -1965,20 +2157,26 @@ class TreasureCaptureProcessor:
             return None
         return (marker[0] / width, marker[1] / height)
 
-    def detect_zone_from_banner(self, image: Image.Image) -> Optional[dict]:
+    def detect_zone_from_banner(
+        self, image: Image.Image, *, trust_frame: bool = False
+    ) -> Optional[dict]:
         """상단 '야크텔 밀림' 같은 지역명 배너에서 zones.json 매칭"""
-        zone, score, _text = self.detect_zone_from_banner_scored(image)
+        zone, score, _text = self.detect_zone_from_banner_scored(
+            image, trust_frame=trust_frame
+        )
         if zone is not None and score >= 0.55:
             return zone
         return None
 
     def detect_zone_from_banner_scored(
-        self, image: Image.Image
+        self, image: Image.Image, *, trust_frame: bool = False
     ) -> tuple[Optional[dict], float, Optional[str]]:
         """배너 OCR → (지역, 신뢰도, OCR 원문)"""
         if not self._tesseract_available:
             return None, 0.0, None
 
+        # 분석 캡처는 오버레이 숨긴 뒤 찍힘 — 금색 배너를 노란 가이드로 오탐해
+        # 역제거하면 색이 깨지므로 OCR 경로에서는 역제거하지 않음
         best_zone: Optional[dict] = None
         best_score = 0.0
         best_text: Optional[str] = None
@@ -1986,21 +2184,23 @@ class TreasureCaptureProcessor:
         ocr_calls = 0
         max_calls_per_crop = 12
 
-        banner_crops = self._banner_crops(image)
+        banner_crops = self._banner_crops(image, trust_frame=trust_frame)
         if not banner_crops:
             logger.debug(
-                "banner_ocr 크롭 없음: image=%dx%d (배너/지역명 띠 미검출)",
+                "banner_ocr 크롭 없음: image=%dx%d trust_frame=%s",
                 image.width,
                 image.height,
+                trust_frame,
             )
             return best_zone, best_score, best_text
 
         logger.debug(
-            "banner_ocr 시작: image=%dx%d crops=%d slot_h=%d",
+            "banner_ocr 시작: image=%dx%d crops=%d slot_h=%d trust_frame=%s",
             image.width,
             image.height,
             len(banner_crops),
             self.fixed_banner_target_zone(image.width, image.height)[3],
+            trust_frame,
         )
 
         for crop_idx, banner in enumerate(banner_crops):
@@ -2051,9 +2251,19 @@ class TreasureCaptureProcessor:
         return best_zone, best_score, best_text
 
     def resolve_banner_zone(
-        self, image: Image.Image, *, refocus: bool = True
+        self,
+        image: Image.Image,
+        *,
+        refocus: bool = True,
+        trust_frame: bool = False,
     ) -> tuple[Optional[dict], float, Optional[str], Image.Image | None]:
         """캡처 보정 후 배너에서 지역명 우선 판별 — (zone, score, text, OCR용 map_window)"""
+        if trust_frame:
+            zone, score, text = self.detect_zone_from_banner_scored(
+                image, trust_frame=True
+            )
+            return zone, score, text, image
+
         best_zone: Optional[dict] = None
         best_score = 0.0
         best_text: Optional[str] = None
@@ -2089,8 +2299,20 @@ class TreasureCaptureProcessor:
 
         return best_zone, best_score, best_text, best_map_window
 
-    def _banner_crops(self, image: Image.Image) -> list[Image.Image]:
-        """배너 OCR용 크롭 — 초록 슬롯(상단 22%) + 좌측 지역명 영역 우선"""
+    @classmethod
+    def fixed_slot_banner_ocr_box(
+        cls, width: int, height: int
+    ) -> tuple[int, int, int, int]:
+        """오버레이 고정 슬롯(상단 22%) — recognition_box와 동일 좌표"""
+        text_left = int(width * 0.04)
+        text_right = int(width * 0.62)
+        _sx1, _sy1, _sx2, sy2 = cls.fixed_banner_target_zone(width, height)
+        return (text_left, 0, text_right, min(height, sy2))
+
+    def _banner_crops(
+        self, image: Image.Image, *, trust_frame: bool = False
+    ) -> list[Image.Image]:
+        """배너 OCR용 크롭 — trust_frame이면 고정 슬롯만, 아니면 title_band 주력"""
         width, height = image.size
         crops: list[Image.Image] = []
         seen: set[tuple[int, int, int, int]] = set()
@@ -2109,47 +2331,68 @@ class TreasureCaptureProcessor:
             padded_img = ImageOps.expand(cropped_img, border=6, fill="black")
             crops.append(padded_img)
 
-        slot = self.fixed_banner_target_zone(width, height)
-        _sx1, _sy1, _sx2, sy2 = slot
+        if trust_frame:
+            add_crop(self.fixed_slot_banner_ocr_box(width, height))
+            return crops
+
         rgb = np.array(image.convert("RGB"))
-        band = self._find_banner_band_bounds(rgb)
-        # 지역명은 좌측 — 우측 파티 아이콘·지형 노이즈 제외
+        marker = self._find_treasure_x_marker(rgb)
         text_left = int(width * 0.04)
         text_right = int(width * 0.62)
-        crop_bottom = min(height, sy2)
+        pad_y = max(4, int(height * 0.02))
 
-        # 1) 초록 슬롯 — y1=0 고정 (밴드 y1은 글자 꼭대기보다 아래라 잘림 유발)
-        add_crop((text_left, 0, text_right, crop_bottom))
-        add_crop((0, 0, int(width * 0.72), crop_bottom))
+        title_band = self._find_title_text_band(rgb, marker=marker)
 
-        # 2) 어두운 배너 — 가로만 밴드에 맞추고 세로는 슬롯 전체(y1=0)
-        if band is not None:
-            x1, _y1, x2, y2 = band
+        # 1) title_band — 주력 OCR 크롭
+        if title_band is not None:
+            tx1, ty1, tx2, ty2 = title_band
+            extra_bottom = max(4, int(height * 0.02))
             add_crop(
                 (
-                    max(0, x1),
-                    0,
-                    min(x2, text_right),
-                    min(height, max(crop_bottom, y2 + 2)),
+                    max(0, tx1),
+                    ty1,
+                    min(tx2, text_right),
+                    min(height, ty2 + extra_bottom),
                 )
             )
 
-        # 3) 밝은 양피지(라비린토스 등) — 밴드 미검출 시 슬롯 전체 너비
-        if band is None:
-            add_crop((0, 0, width, crop_bottom))
+        # 2) title_band 미검출 시에만 폴백 크롭 (좁은 슬롯 → 넓은 구간 → band)
+        if title_band is None:
+            slot = self.fixed_banner_target_zone(width, height)
+            _sx1, _sy1, _sx2, sy2 = slot
+            add_crop((text_left, 0, text_right, min(height, sy2)))
 
-        return crops[:3]
+            if marker is not None:
+                banner_bottom = min(
+                    height,
+                    max(
+                        int(height * self.TEMPLATE_BANNER_HEIGHT_RATIO),
+                        int(marker[1]) - max(8, int(height * 0.05)),
+                    ),
+                )
+                if banner_bottom > sy2 + 6:
+                    add_crop((text_left, 0, text_right, banner_bottom))
 
-    def _crop_banner_region(self, image: Image.Image) -> Image.Image | None:
-        """지도 창 어두운 지역명 배너만 잘라 OCR 정확도 개선"""
-        rgb = np.array(image.convert("RGB"))
-        band = self._find_banner_band_bounds(rgb)
-        if band is None:
-            return None
-        x1, y1, x2, y2 = band
-        if y2 - y1 < 6:
-            return None
-        return image.crop((x1, y1, x2, y2))
+            band = self._find_banner_band_bounds(rgb, marker=marker)
+            if band is not None and self._band_has_title_ink(rgb, band):
+                bx1, by1, bx2, by2 = band
+                add_crop(
+                    (
+                        max(0, bx1),
+                        max(0, by1 - pad_y),
+                        min(bx2, text_right),
+                        min(height, by2 + pad_y),
+                    )
+                )
+
+            if marker is None:
+                slot = self.fixed_banner_target_zone(width, height)
+                _sx1, _sy1, _sx2, sy2 = slot
+                crop_bottom = min(height, sy2)
+                add_crop((text_left, 0, text_right, crop_bottom))
+                add_crop((0, 0, int(width * 0.72), crop_bottom))
+
+        return crops[:4]
 
     _OVERLAY_OCR_KEYWORDS: tuple[str, ...] = (
         "드래그",
@@ -2202,7 +2445,7 @@ class TreasureCaptureProcessor:
     @staticmethod
     def _extract_banner_hangul_runs(compact: str) -> list[str]:
         """OCR 잡음 뒤에 붙은 한글을 제외하고 지역명 후보 구간만 추출"""
-        return re.findall(r"[가-힣]{3,8}", compact)
+        return re.findall(r"[가-힣]{3,12}", compact)
 
     def _match_banner_text_scored_with_runs(
         self, text: str
@@ -2308,6 +2551,15 @@ class TreasureCaptureProcessor:
             sub = self._subsequence_coverage(name, ocr_ko)
             win = self._best_window_similarity(name, ocr_ko)
             score = max(inline, sub * 0.94, win * 0.90)
+
+            # OCR 앞부분이 깨져도 고유 꼬리(서부고지 등)로 식별
+            for tail_len in range(min(len(name), 8), 3, -1):
+                tail = name[-tail_len:]
+                if len(tail) < 4:
+                    continue
+                if tail in ocr_ko:
+                    score = max(score, 0.78 + 0.22 * (tail_len / len(name)))
+                    break
 
             if score > best_score:
                 second_score = best_score
@@ -3130,14 +3382,24 @@ class TreasureCaptureProcessor:
             debug_dir.mkdir(exist_ok=True)
             banner.save(debug_dir / f"crop_{time.time_ns()}.png")
 
-        scale = max(4, int(520 / max(banner.width, 1)), int(360 / max(banner.height, 1)))
-        scale = min(scale, 12)
+        scale = max(
+            5,
+            int(520 / max(banner.width, 1)),
+            int(360 / max(banner.height, 1)),
+            int(640 / max(banner.width, banner.height, 1)),
+        )
+        scale = min(scale, 14)
         scaled = banner.resize(
             (banner.width * scale, banner.height * scale),
             Image.Resampling.LANCZOS,
         )
         rgb = np.array(scaled.convert("RGB"))
         gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+        local_mean = cv2.GaussianBlur(gray, (11, 11), 0)
+        bright_on_dark = (
+            (gray > 148) & (local_mean < 118)
+        ).astype(np.uint8) * 255
+        dark_banner = Image.fromarray(255 - bright_on_dark)
 
         strict_white = Image.fromarray(
             np.where(
@@ -3190,10 +3452,11 @@ class TreasureCaptureProcessor:
 
         _chars, zone_whitelist, _entries = self._zone_name_lexicon()
 
-        # 흰 글씨(어두운 배너) 우선 → zones.json 글자 whitelist로 노이즈 억제
+        # 어두운 배너(커르다스) → 흰 글씨 우선, 긴 지역명은 PSM 6 블록도 시도
         stages: list[tuple[Image.Image, tuple[int, ...]]] = [
-            (strict_white, (7, 8)),
-            (white, (7, 8)),
+            (dark_banner, (6, 7, 8)),
+            (strict_white, (6, 7, 8)),
+            (white, (6, 7, 8)),
             (gray_scaled, (7, 8)),
             (contrast_inv, (7,)),
             (Image.fromarray(binary), (7, 13)),

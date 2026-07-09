@@ -134,10 +134,13 @@ class RecognitionBox(QWidget):
                 * TreasureCaptureProcessor.TEMPLATE_BANNER_HEIGHT_RATIO
             ),
         )
+        # OCR 고정 슬롯과 동일 — 좌 4%~62%, 상단 22%
+        text_left = int(self._frame_rect.width() * 0.04)
+        text_right = int(self._frame_rect.width() * 0.62)
         self._banner_target_rect = QRect(
-            self._frame_rect.left(),
+            self._frame_rect.left() + text_left,
             self._frame_rect.top(),
-            self._frame_rect.width(),
+            max(8, text_right - text_left),
             slot_h,
         )
 
