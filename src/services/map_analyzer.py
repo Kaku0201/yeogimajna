@@ -18,7 +18,11 @@ from src.services.coordinate_service import CoordinateService
 from src.services.detail_map_locator import DetailLocateResult, DetailMapLocator
 from src.services.map_pack_service import MapPackService
 from src.services.match_stats import MatchStatsService
-from src.services.treasure_capture import TreasureCaptureProcessor
+from src.services.treasure_capture import (
+    PARTY_STRONG_REASONS,
+    PARTY_WEAK_REASONS,
+    TreasureCaptureProcessor,
+)
 from src.services.treasure_map_matcher import TreasureMapMatch, TreasureMapMatcher
 from src.services.user_ref_learn import UserRefLearnService
 
@@ -495,30 +499,52 @@ class MapAnalyzer:
 
         반환: (party_size, uncertain) — uncertain이면 캐시/추정값이라 재시도 허용.
         """
+        # 직접 OCR/위상 판독은 즉시 신뢰. solo_topology0 등 약한 휴리스틱은
+        # 실제 '8'을 solo로 오판하므로 aggressive 교차확인 또는 uncertain 처리.
+        strong_reasons = PARTY_STRONG_REASONS
+
         sources: list[tuple[str, Image.Image]] = []
         if map_window is not None:
             sources.append(("map_window", map_window))
         if capture_image is not None and capture_image is not map_window:
             sources.append(("capture", capture_image))
 
+        weak_detected: int | None = None
         for label, source in sources:
             detected = self.capture_processor.detect_party_size(
                 source, debug_source=label
             )
-            if detected in (1, 8):
+            if detected not in (1, 8):
+                continue
+            trace = self.capture_processor.last_party_trace
+            reason = trace.reason if trace is not None else ""
+            if reason in strong_reasons:
                 self._party_size_by_zone[zone_id] = detected
                 if is_debug():
                     logger.debug(
-                        "[party] resolve zone=%s party_size=%s uncertain=False via=%s image=%dx%d",
+                        "[party] resolve zone=%s party_size=%s uncertain=False "
+                        "via=%s reason=%s image=%dx%d",
                         zone_id,
                         detected,
                         label,
+                        reason,
                         source.width,
                         source.height,
                     )
                 else:
-                    logger.debug("party_size 인식 %s -> %s", zone_id, detected)
+                    logger.debug(
+                        "party_size 인식 %s -> %s (%s)", zone_id, detected, reason
+                    )
                 return detected, False
+            # 약한 신호 — 뒤 aggressive 교차확인 후 실패 시에만 사용
+            if weak_detected is None:
+                weak_detected = detected
+                logger.debug(
+                    "party_size 약신호 %s -> %s (%s) — aggressive 교차확인",
+                    zone_id,
+                    detected,
+                    reason,
+                )
 
         party_probe = map_window if map_window is not None else capture_image
         if party_probe is not None:
@@ -546,6 +572,16 @@ class MapAnalyzer:
             if detected in (1, 8):
                 self._party_size_by_zone[zone_id] = detected
                 return detected, False
+
+        # aggressive도 확정 실패 — 약한 solo 신호는 uncertain으로만 사용(혼합 ref 스캔)
+        if weak_detected in (1, 8):
+            self._party_size_by_zone[zone_id] = weak_detected
+            logger.debug(
+                "party_size 약신호 보류 %s -> %s (aggressive 실패, uncertain=True)",
+                zone_id,
+                weak_detected,
+            )
+            return weak_detected, True
 
         cached = self._party_size_by_zone.get(zone_id)
         if cached in (1, 8):
@@ -587,65 +623,52 @@ class MapAnalyzer:
         party_size: int | None,
         uncertain: bool,
     ) -> tuple[int | None, bool]:
-        """16칸 지역 — 아이콘 감지 후 solo/party8 ref coarse로 인원 재확인"""
-        if map_window is None or not self.map_matcher.has_split_party_refs(zone_id):
-            return party_size, uncertain
+        """16칸 지역 — 아이콘 OCR 재시도로 1/8 확정.
 
-        solo_score, party8_score = self.map_matcher.compare_party_folder_coarse(
-            map_window, zone_id
-        )
-        if solo_score < 0 and party8_score < 0:
-            return party_size, uncertain
-
-        margin = 0.035
+        solo/party8 ref는 동일 지형을 공유하고 party8 ref 수가 적어 지형 coarse
+        점수로는 인원을 구분할 수 없다. ref coarse 대신 aggressive 아이콘 OCR로
+        교차확인한다.
+        """
         trace = self.capture_processor.last_party_trace
-        icon_reason = trace.reason if trace else ""
+        reason = trace.reason if trace is not None else ""
 
-        if solo_score - party8_score >= margin:
-            if party_size != 1:
-                logger.debug(
-                    "party ref probe %s -> 1 (solo=%.3f party8=%.3f icon=%s)",
-                    party_size,
-                    solo_score,
-                    party8_score,
-                    icon_reason,
-                )
-            self._store_confirmed_party_size(zone_id, 1)
-            return 1, False
-        if party8_score - solo_score >= margin:
-            if party_size != 8:
-                logger.debug(
-                    "party ref probe %s -> 8 (solo=%.3f party8=%.3f icon=%s)",
-                    party_size,
-                    solo_score,
-                    party8_score,
-                    icon_reason,
-                )
-            self._store_confirmed_party_size(zone_id, 8)
-            return 8, False
+        if (
+            party_size in (1, 8)
+            and not uncertain
+            and reason in PARTY_STRONG_REASONS
+        ):
+            return party_size, uncertain
 
-        if party_size == 8 and solo_score > party8_score + 0.015:
-            logger.debug(
-                "party ref probe weak8 -> 1 (solo=%.3f party8=%.3f icon=%s)",
-                solo_score,
-                party8_score,
-                icon_reason,
+        if map_window is not None:
+            retry = self.capture_processor.detect_party_size_aggressive(
+                map_window, debug_source="confirm"
             )
-            self._store_confirmed_party_size(zone_id, 1)
-            return 1, False
-        if party_size == 1 and party8_score > solo_score + 0.015:
-            logger.debug(
-                "party ref probe weak1 -> 8 (solo=%.3f party8=%.3f)",
-                solo_score,
-                party8_score,
-            )
-            self._store_confirmed_party_size(zone_id, 8)
-            return 8, False
+            if retry in (1, 8):
+                retry_trace = self.capture_processor.last_party_trace
+                retry_reason = retry_trace.reason if retry_trace is not None else ""
+                if retry_reason in PARTY_STRONG_REASONS or retry != party_size:
+                    if party_size != retry:
+                        logger.debug(
+                            "party icon confirm %s -> %s (was %s icon=%s)",
+                            zone_id,
+                            retry,
+                            party_size,
+                            retry_reason,
+                        )
+                    self._store_confirmed_party_size(zone_id, retry)
+                    return retry, False
 
-        if uncertain and party_size not in (1, 8):
-            chosen = 1 if solo_score >= party8_score else 8
-            self._store_confirmed_party_size(zone_id, chosen)
-            return chosen, False
+        if party_size in (1, 8) and reason in PARTY_WEAK_REASONS:
+            logger.debug(
+                "party 약신호 유지 %s -> %s (%s, uncertain=True)",
+                zone_id,
+                party_size,
+                reason,
+            )
+            return party_size, True
+
+        if party_size in (1, 8) and not uncertain:
+            return party_size, uncertain
 
         return party_size, uncertain
 
@@ -882,6 +905,7 @@ class MapAnalyzer:
                 confident_match,
                 ranked,
                 excluded_ref_names=list(exclude_set),
+                party_uncertain=party_uncertain,
             )
 
         if self.map_matcher.count_zone_refs(zone_hint["id"], selected_party_size) > 0:
@@ -919,6 +943,8 @@ class MapAnalyzer:
         confident_match: TreasureMapMatch | None,
         ranked: list[TreasureMapMatch],
         excluded_ref_names: list[str],
+        *,
+        party_uncertain: bool = False,
     ) -> RecognitionResult:
         ref_candidates = self._build_ref_candidates(zone_hint, ranked)
         shown_names = [candidate.ref_name for candidate in ref_candidates]
@@ -947,7 +973,34 @@ class MapAnalyzer:
 
         result.excluded_ref_names = cumulative_excluded
         result.can_rematch = can_rematch
+        self._apply_party_size(result, party_size, party_uncertain)
         return result
+
+    @staticmethod
+    def _party_size_from_ref_name(ref_name: str) -> int | None:
+        if ref_name.startswith("solo/"):
+            return 1
+        if ref_name.startswith("party8/"):
+            return 8
+        return None
+
+    @staticmethod
+    def _apply_party_size(
+        result: RecognitionResult,
+        party_size: int | None,
+        uncertain: bool = False,
+    ) -> None:
+        if party_size in (1, 8):
+            result.party_size = party_size
+            result.party_size_uncertain = uncertain
+            return
+        if result.ref_candidates:
+            from_ref = MapAnalyzer._party_size_from_ref_name(
+                result.ref_candidates[0].ref_name
+            )
+            if from_ref in (1, 8):
+                result.party_size = from_ref
+                result.party_size_uncertain = uncertain
 
     def _build_result_from_learned(
         self,
@@ -982,6 +1035,11 @@ class MapAnalyzer:
             result.auto_candidate_rank = 1
         else:
             result.ref_candidates = []
+        self._apply_party_size(
+            result,
+            self._party_size_from_ref_name(learned.ref_name),
+            False,
+        )
         return result
 
     def _resolve_ref_path(self, zone_id: str, ref_name: str) -> Path | None:

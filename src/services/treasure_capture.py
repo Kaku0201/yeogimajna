@@ -16,6 +16,12 @@ from src.services.tesseract_config import has_korean_language
 
 logger = logging.getLogger(__name__)
 
+# party 아이콘 OCR/위상 판별 신뢰도 — map_analyzer 교차확인에도 사용
+PARTY_STRONG_REASONS = frozenset(
+    {"ocr1", "ocr8", "ocr_full1", "ocr_full8", "topology8"}
+)
+PARTY_WEAK_REASONS = frozenset({"solo_topology0", "digit_bright_solo"})
+
 
 @dataclass
 class PartyDetectTrace:
@@ -2996,10 +3002,17 @@ class TreasureCaptureProcessor:
 
     @staticmethod
     def _confirm_topology_eight(left_bright: float, holes: int) -> bool:
-        """8 판정 — 구멍 2개 이상만 자동 8 (1은 구멍 1개 오탐이 많음)"""
+        """8 판정 — 구멍 2개 이상만 (1개는 solo '1' 오탐과 겹침)."""
         if holes >= 2:
             return left_bright >= 0.04
         return False
+
+    @staticmethod
+    def _ocr_one_likely_eight_misread(
+        holes: int | None, left_bright: float
+    ) -> bool:
+        """OCR '1'이지만 위상상 8일 가능성 — 구멍 2개 이상일 때만."""
+        return holes is not None and holes >= 2 and left_bright >= 0.04
 
     @staticmethod
     def _solo_icon_signals(icon: Image.Image) -> bool:
@@ -3035,10 +3048,15 @@ class TreasureCaptureProcessor:
 
         ocr = self._ocr_party_digit_roi(icon, trace)
         if ocr == 1:
-            if trace is not None:
-                trace.result = 1
-                trace.reason = "ocr1"
-            return 1
+            if self._ocr_one_likely_eight_misread(holes, left_bright):
+                if trace is not None:
+                    trace.ocr_digit = 1
+                    trace.reason = "ocr1_rejected_holes"
+            else:
+                if trace is not None:
+                    trace.result = 1
+                    trace.reason = "ocr1"
+                return 1
         if ocr == 8:
             if holes == 0:
                 if trace is not None:
@@ -3050,11 +3068,25 @@ class TreasureCaptureProcessor:
                     trace.reason = "ocr8"
                 return 8
 
-        if self._solo_icon_signals(icon):
+        # 숫자 ROI OCR 실패 시, solo 위상 휴리스틱보다 full-icon OCR을 먼저 시도한다.
+        # 숫자 ROI 분리가 불완전하면 실제 '8'의 구멍이 0으로 오계수돼 solo로 오판하므로,
+        # 깨끗한 '8'/'1' 판독을 휴리스틱보다 우선해 8→1 오판을 막는다.
+        ocr_full = self._ocr_party_icon_full(icon, trace)
+        if ocr_full == 8:
             if trace is not None:
-                trace.result = 1
-                trace.reason = "solo_topology0"
-            return 1
+                trace.result = 8
+                trace.reason = "ocr_full8"
+            return 8
+        if ocr_full == 1:
+            if self._ocr_one_likely_eight_misread(holes, left_bright):
+                if trace is not None:
+                    trace.ocr_digit = 1
+                    trace.reason = "ocr_full1_rejected_holes"
+            else:
+                if trace is not None:
+                    trace.result = 1
+                    trace.reason = "ocr_full1"
+                return 1
 
         topology = self._topology_party_digit(icon, trace)
         if topology == 8:
@@ -3063,17 +3095,11 @@ class TreasureCaptureProcessor:
                 trace.reason = "topology8"
             return 8
 
-        ocr_full = self._ocr_party_icon_full(icon, trace)
-        if ocr_full == 1:
+        if self._solo_icon_signals(icon):
             if trace is not None:
                 trace.result = 1
-                trace.reason = "ocr_full1"
+                trace.reason = "solo_topology0"
             return 1
-        if ocr_full == 8 and holes != 0:
-            if trace is not None:
-                trace.result = 8
-                trace.reason = "ocr_full8"
-            return 8
 
         _left, right_ratio = self._party_icon_metrics(icon)
         if trace is not None:
@@ -3204,6 +3230,7 @@ class TreasureCaptureProcessor:
         ocr_images.append(("full_contrast", Image.fromarray(255 - enhanced)))
         self._save_party_debug_images(icon, ocr_images)
 
+        parsed_hits: list[int] = []
         for variant, ocr_image in ocr_images:
             for psm in (10, 7):
                 try:
@@ -3218,16 +3245,23 @@ class TreasureCaptureProcessor:
                         trace.ocr_attempts.append(
                             f"{variant}/psm{psm} raw={text!r} parsed={parsed}"
                         )
-                    if parsed is not None:
-                        if trace is not None:
-                            trace.ocr_raw = text.strip()
-                            trace.ocr_digit = parsed
-                        return parsed
+                    if parsed in (1, 8):
+                        parsed_hits.append(parsed)
                 except Exception as exc:
                     if collect_trace and trace.ocr_attempts is not None:
                         trace.ocr_attempts.append(
                             f"{variant}/psm{psm} error={exc!s}"
                         )
+
+        # variant마다 1/8이 다르게 나올 수 있음 — 8 우선(1 오인 방지)
+        if 8 in parsed_hits:
+            if trace is not None:
+                trace.ocr_digit = 8
+            return 8
+        if 1 in parsed_hits:
+            if trace is not None:
+                trace.ocr_digit = 1
+            return 1
         return None
 
     def _ocr_party_icon(
@@ -3290,9 +3324,28 @@ class TreasureCaptureProcessor:
     def _party_icon_crop(
         self, image: Image.Image
     ) -> tuple[Image.Image, tuple[int, int, int, int]] | None:
+        crops = self._party_icon_crops(image)
+        return crops[0] if crops else None
+
+    def _party_icon_crops(
+        self, image: Image.Image
+    ) -> list[tuple[Image.Image, tuple[int, int, int, int]]]:
+        """1/8 아이콘 후보 크롭 — 양피지 경계 기반 + 비율 fallback(하단 좌측)."""
         width, height = image.size
         if width < 40 or height < 40:
-            return None
+            return []
+
+        crops: list[tuple[Image.Image, tuple[int, int, int, int]]] = []
+        seen: set[tuple[int, int, int, int]] = set()
+
+        def add_crop(box: tuple[int, int, int, int]) -> None:
+            x1, y1, x2, y2 = box
+            if box in seen:
+                return
+            if x2 - x1 < 30 or y2 - y1 < 18:
+                return
+            seen.add(box)
+            crops.append((image.crop(box), box))
 
         rgb = np.array(image.convert("RGB"))
         parchment = self._parchment_bounds(rgb)
@@ -3300,20 +3353,40 @@ class TreasureCaptureProcessor:
             px1, _py1, px2, py2 = parchment
             parch_w = max(1, px2 - px1)
             parch_h = max(1, py2 - parchment[1])
-            icon_h = max(24, int(parch_h * 0.32))
-            # 양피지 좌하단 전체 — 사람 아이콘 + 숫자(8)까지 포함
+            icon_h = max(24, int(parch_h * 0.20))
             x1 = max(0, px1 - 2)
             y1 = max(0, py2 - icon_h)
-            x2 = min(width, px2 + 4)
+            x2 = min(width, px1 + max(48, int(parch_w * 0.34)))
             y2 = min(height, py2 + 4)
-            if x2 - x1 >= 30 and y2 - y1 >= 18:
-                box = (x1, y1, x2, y2)
-                return image.crop(box), box
+            add_crop((x1, y1, x2, y2))
 
-        icon_top = int(height * 0.78)
-        right = int(width * 0.38)
-        box = (0, icon_top, right, height)
-        return image.crop(box), box
+        # 실측: parchment 크롭보다 단순 비율 크롭에서 inverted full OCR이 더 잘 맞음
+        for top_ratio, width_ratio in ((0.78, 0.30), (0.76, 0.28), (0.80, 0.32)):
+            add_crop(
+                (
+                    0,
+                    int(height * top_ratio),
+                    int(width * width_ratio),
+                    height,
+                )
+            )
+
+        if not crops:
+            icon_top = int(height * 0.78)
+            right = int(width * 0.38)
+            add_crop((0, icon_top, right, height))
+        return crops
+
+    @staticmethod
+    def _party_signal_rank(trace: PartyDetectTrace | None, result: int | None) -> int:
+        """크롭 후보 중 최선 party 판정 선택용 — strong > neutral > weak."""
+        if result not in (1, 8) or trace is None:
+            return -1
+        if trace.reason in PARTY_STRONG_REASONS:
+            return 3
+        if trace.reason in PARTY_WEAK_REASONS:
+            return 0
+        return 1
 
     def detect_party_size(
         self,
@@ -3323,8 +3396,8 @@ class TreasureCaptureProcessor:
     ) -> int | None:
         """하단 좌측 1/8 아이콘 숫자 (1=솔로, 8=8인)"""
         self._party_debug_saved = False
-        cropped = self._party_icon_crop(image)
-        if cropped is None:
+        crops = self._party_icon_crops(image)
+        if not crops:
             trace = PartyDetectTrace(
                 source=debug_source,
                 image_size=image.size,
@@ -3335,16 +3408,40 @@ class TreasureCaptureProcessor:
             self._log_party_trace(trace)
             return None
 
-        icon, box = cropped
-        trace = PartyDetectTrace(
-            source=debug_source,
-            image_size=image.size,
-            crop_box=box,
-        )
-        result = self._resolve_party_digit(icon, trace)
-        self._last_party_trace = trace
-        self._log_party_trace(trace)
-        return result
+        best_result: int | None = None
+        best_rank = -1
+        best_trace: PartyDetectTrace | None = None
+        strong_hits: list[tuple[int, PartyDetectTrace]] = []
+
+        for icon, box in crops:
+            trace = PartyDetectTrace(
+                source=debug_source,
+                image_size=image.size,
+                crop_box=box,
+            )
+            result = self._resolve_party_digit(icon, trace)
+            if (
+                result in (1, 8)
+                and trace.reason in PARTY_STRONG_REASONS
+            ):
+                strong_hits.append((result, trace))
+            rank = self._party_signal_rank(trace, result)
+            if rank > best_rank:
+                best_rank = rank
+                best_result = result
+                best_trace = trace
+
+        # 크롭마다 ocr_full1 / ocr_full8이 동시에 strong이면 8 우선
+        # (8 아이콘을 1로 오인하는 케이스가 더 흔함)
+        if strong_hits:
+            eights = [item for item in strong_hits if item[0] == 8]
+            pick = eights[0] if eights else strong_hits[0]
+            best_result, best_trace = pick[0], pick[1]
+
+        if best_trace is not None:
+            self._last_party_trace = best_trace
+            self._log_party_trace(best_trace)
+        return best_result
 
     def detect_party_size_aggressive(
         self,

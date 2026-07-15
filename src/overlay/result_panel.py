@@ -13,6 +13,24 @@ from src.services.aetheryte_icon_service import AetheryteIconService
 CANDIDATE_THUMB_SIZE = 179
 
 
+def _party_label_from_ref(ref_name: str) -> str:
+    """ref_name 접두어(solo/·party8/)로 인원수 배지."""
+    if ref_name.startswith("solo/"):
+        return "1인"
+    if ref_name.startswith("party8/"):
+        return "8인"
+    return ""
+
+
+def _party_badge_text(party_size: int | None, uncertain: bool = False) -> str:
+    """결과 패널용 인원 배지."""
+    if party_size == 1:
+        return "1인" + ("?" if uncertain else "")
+    if party_size == 8:
+        return "8인" + ("?" if uncertain else "")
+    return ""
+
+
 class _CandidateTile(QFrame):
     """ref DB 후보 1칸 — 클릭 시 상세 지도, 확정 시 학습"""
 
@@ -70,7 +88,10 @@ class _CandidateTile(QFrame):
         learn_hits: int | None = None,
     ) -> None:
         self._candidate = candidate
-        self.rank_label.setText(f"#{candidate.rank}")
+        party = _party_label_from_ref(candidate.ref_name)
+        self.rank_label.setText(
+            f"#{candidate.rank} · {party}" if party else f"#{candidate.rank}"
+        )
         self.coord_label.setText(f"{candidate.x:.1f}, {candidate.y:.1f}")
 
         pixmap = QPixmap(candidate.ref_image_path)
@@ -360,12 +381,16 @@ class ResultPanel(QFrame):
         self, result: RecognitionResult, stats_hint: str = ""
     ) -> None:
         self._result = result
+        party_badge = _party_badge_text(
+            result.party_size, result.party_size_uncertain
+        )
+        party_suffix = f" · {party_badge}" if party_badge else ""
         if result.confirmed_ref_name and result.learn_hits:
             self.zone_label.setText(
-                f"📍 {result.zone_name}  ✓ 확정 ({result.learn_hits}회 학습)"
+                f"📍 {result.zone_name}{party_suffix}  ✓ 확정 ({result.learn_hits}회 학습)"
             )
         else:
-            self.zone_label.setText(f"📍 {result.zone_name}")
+            self.zone_label.setText(f"📍 {result.zone_name}{party_suffix}")
 
         if result.match_source == "learned":
             hits = result.learn_hits or 1

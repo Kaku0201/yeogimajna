@@ -26,6 +26,8 @@ class RecognitionResult:
     can_rematch: bool = False
     confirmed_ref_name: str | None = None
     learn_hits: int | None = None
+    party_size: int | None = None
+    party_size_uncertain: bool = False
 
     @property
     def coordinate_text(self) -> str:

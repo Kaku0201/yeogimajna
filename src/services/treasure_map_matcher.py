@@ -93,17 +93,39 @@ class TreasureMapMatcher:
     2) top-K만 full 해상도 정밀 비교
     """
 
-    CONFIDENT_SCORE = 0.85
+    # 빨간 X marker 위치 보정 스위치.
+    # ref_maker가 보물 좌표를 크롭 중심에 놓으므로 X는 모든 ref에서 대략 중앙 →
+    # spot 구분에 변별력이 없고, 검출 실패 시 중앙 기본값(0.4831/0.4751)으로 떨어져
+    # 오답 ref에 허위 보너스를 준다. 실측상 terrain 단독이 100%, marker 보정이 오히려
+    # 정확도를 떨어뜨려(78~94%) 비활성화한다.
+    MARKER_ADJUST_ENABLED = False
+
+    # 확신 판정: 절대 점수 문턱 + 마진(1등-2등 격차).
+    # DoG 밴드패스 특징은 양피지 노이즈를 제거하는 대신 절대 점수대가 낮아진다
+    # (self-match≈1.0, 실제 인게임 캡처≈0.55~0.65). 문턱을 실측 캡처 분포에 맞춰
+    # 재조정하되, 마진(경쟁 spot 대비 격차)을 주 신호로 삼아 오확정을 막는다.
+    CONFIDENT_SCORE = 0.55          # 고득점 경로 절대 하한
+    CONFIDENT_SCORE_HIGH = 0.68     # 이 이상이면 마진 요구 완화
     MIN_MARGIN = 0.06
     STRONG_MARGIN = 0.10
-    EARLY_EXIT_SCORE = 0.93
-    EARLY_EXIT_MARGIN = 0.12
+    DOMINANT_MARGIN = 0.14          # 마진 우세 경로 — 절대 점수 중간이어도 확정
+    DOMINANT_SCORE_FLOOR = 0.48     # 마진 우세 경로 절대 하한(쓰레기 매칭 차단)
 
     COARSE_MAX_SIDE = 128
     COARSE_SCALE_STEPS = 4
     REFINE_SCALE_STEPS = 7
     REFINE_TOP_K = 12
     FULL_SCAN_REF_THRESHOLD = 8
+
+    # 콘텐츠 스케일 탐색: 인게임 지도 창은 ref 크롭보다 더 넓은 영역을 보여줘
+    # (실측 ~0.65배) 정규화만으로는 지형이 겹치지 않는다. 쿼리를 중앙에서 여러
+    # 비율로 잘라 각각 채점하고, 1등-2등 마진이 가장 큰 스케일의 순위를 채택한다.
+    # 참 스케일에서 정답 봉우리가 가장 날카롭게 서므로 마진이 최대가 된다.
+    # factor=1.0은 self-match(ref==query) 및 이미 꽉 찬 캡처를 위해 유지.
+    CONTENT_SCALE_FACTORS = (1.0, 0.82, 0.70, 0.60)
+    # 이 이상으로 확신되면 다른 스케일을 더 보지 않고 조기 종료(속도).
+    CONTENT_SCALE_SKIP_SCORE = 0.82
+    CONTENT_SCALE_SKIP_MARGIN = 0.15
     MARKER_ALIGN_MAX_DIST = 0.12
     MARKER_BONUS_CAP = 0.12
     MARKER_MISMATCH_PENALTY = 0.50
@@ -543,50 +565,47 @@ class TreasureMapMatcher:
             scored[0]
         )
         second_adj = scored[1][0] if len(scored) > 1 else -1.0
-
-        if best_adj < self.CONFIDENT_SCORE:
-            if not (
-                query_rel is not None
-                and marker_dist <= self.MARKER_ALIGN_MAX_DIST
-                and best_combined >= self.MARKER_TERRAIN_FLOOR
-            ):
-                logger.debug(
-                    "ref 확신 부족 %s adj=%.3f terrain=%.3f marker_dist=%.3f",
-                    zone_id,
-                    best_adj,
-                    best_combined,
-                    marker_dist,
-                )
-                return None
-
         margin = best_adj - max(second_adj, 0.0)
+
+        # 경로 A: 절대 점수 충분 + 최소 마진 (점수 높으면 마진 요구 완화)
         required_margin = (
-            self.STRONG_MARGIN
-            if best_adj < 0.92
-            else self.MIN_MARGIN
+            self.MIN_MARGIN
+            if best_adj >= self.CONFIDENT_SCORE_HIGH
+            else self.STRONG_MARGIN
         )
-        if margin < required_margin:
+        high_score = best_adj >= self.CONFIDENT_SCORE and margin >= required_margin
+
+        # 경로 B: 마진 우세 — 1등이 2등을 크게 앞서면 절대 점수 중간이어도 확정
+        dominant = (
+            margin >= self.DOMINANT_MARGIN
+            and best_adj >= self.DOMINANT_SCORE_FLOOR
+        )
+
+        if high_score or dominant:
+            return self._to_match(
+                (best_adj, best_ccorr, best_ssim),
+                best_entry,
+                terrain_score=best_combined,
+                marker_dist=marker_dist,
+            )
+
+        # 확신 미달 — marker rescue(비활성) / 순수 지형 마진 tie-break 시도
+        if self.MARKER_ADJUST_ENABLED:
             marker_pick = self._pick_by_marker_alignment(scored, query_rel)
             if marker_pick is not None:
                 return marker_pick
-            terrain_pick = self._pick_by_terrain_margin(scored)
-            if terrain_pick is not None:
-                return terrain_pick
-            logger.debug(
-                "ref margin 부족 %s adj=%.3f margin=%.3f need>=%.3f",
-                zone_id,
-                best_adj,
-                margin,
-                required_margin,
-            )
-            return None
+        terrain_pick = self._pick_by_terrain_margin(scored)
+        if terrain_pick is not None:
+            return terrain_pick
 
-        return self._to_match(
-            (best_adj, best_ccorr, best_ssim),
-            best_entry,
-            terrain_score=best_combined,
-            marker_dist=marker_dist,
+        logger.debug(
+            "ref 확신 부족 %s adj=%.3f terrain=%.3f margin=%.3f",
+            zone_id,
+            best_adj,
+            best_combined,
+            margin,
         )
+        return None
 
     def _log_ref_top3(
         self,
@@ -649,28 +668,83 @@ class TreasureMapMatcher:
             ]
         if not entries:
             return [], None
-        t_entries_ready = time.perf_counter()
 
-        # ref marker_rel은 원본 PNG 기준 — normalize 전 쿼리에서 동일 좌표계로 추출
+        # ref marker_rel은 원본 PNG 기준 — normalize 전 원본 쿼리에서 동일 좌표계로 추출
         query_rel = self._query_marker_rel(fragment)
 
-        match_fragment = self._normalize_query_to_refs(fragment, entries)
-        if match_fragment.size != fragment.size:
-            logger.debug(
-                "query normalize %dx%d -> %dx%d (ref target %dx%d)",
-                fragment.width,
-                fragment.height,
-                match_fragment.width,
-                match_fragment.height,
-                *self._ref_target_size(entries),
+        # 콘텐츠 스케일 탐색 — 여러 중앙 크롭 비율로 채점 후 마진 최대 스케일 채택.
+        best_scored: list[tuple[float, float, float, float, _RefEntry, float]] | None = None
+        best_margin = -1.0
+        best_factor = 1.0
+        for factor in self.CONTENT_SCALE_FACTORS:
+            query_img = self._center_crop_fragment(fragment, factor)
+            scored = self._score_query_image(
+                query_img, entries, query_rel, full_scan
             )
-            if is_debug():
-                norm_rel = self._query_marker_rel(match_fragment)
-                logger.debug(
-                    "query_rel orig=%s norm=%s (marker는 orig 기준 사용)",
-                    query_rel,
-                    norm_rel,
-                )
+            if not scored:
+                continue
+            margin = self._scored_margin(scored)
+            if margin > best_margin:
+                best_margin = margin
+                best_scored = scored
+                best_factor = factor
+            # 첫 스케일(=1.0)만으로 이미 확신되면 나머지 생략(self-match·꽉 찬 캡처 속도).
+            if (
+                scored[0][1] >= self.CONTENT_SCALE_SKIP_SCORE
+                and margin >= self.CONTENT_SCALE_SKIP_MARGIN
+            ):
+                break
+
+        if best_scored is None:
+            return [], query_rel
+
+        logger.debug(
+            "timing[_score_zone] zone=%s entries=%d full_scan=%s "
+            "scale=%.2f margin=%.3f TOTAL=%.1fms",
+            zone_id,
+            len(entries),
+            full_scan,
+            best_factor,
+            best_margin,
+            (time.perf_counter() - t0) * 1000,
+        )
+        return best_scored, query_rel
+
+    @staticmethod
+    def _center_crop_fragment(
+        fragment: Image.Image, factor: float
+    ) -> Image.Image:
+        """쿼리 중앙을 factor 비율로 크롭 — 인게임 지도가 ref보다 넓은 스케일 보정."""
+        if factor >= 1.0:
+            return fragment
+        w, h = fragment.size
+        cw = max(1, int(round(w * factor)))
+        ch = max(1, int(round(h * factor)))
+        left = (w - cw) // 2
+        top = (h - ch) // 2
+        return fragment.crop((left, top, left + cw, top + ch))
+
+    @staticmethod
+    def _scored_margin(
+        scored: list[tuple[float, float, float, float, _RefEntry, float]],
+    ) -> float:
+        """지형 combined 기준 1등-2등 격차 (스케일 선택 신호)."""
+        if not scored:
+            return -1.0
+        combined = sorted((item[1] for item in scored), reverse=True)
+        if len(combined) < 2:
+            return combined[0]
+        return combined[0] - combined[1]
+
+    def _score_query_image(
+        self,
+        query_img: Image.Image,
+        entries: list[_RefEntry],
+        query_rel: tuple[float, float] | None,
+        full_scan: bool,
+    ) -> list[tuple[float, float, float, float, _RefEntry, float]]:
+        """단일 쿼리 이미지를 존 전체 ref와 채점 (coarse 선별 → refine)."""
+        match_fragment = self._normalize_query_to_refs(query_img, entries)
 
         _patch, query_gray, query_center = (
             TreasureCaptureProcessor.prepare_matching_patch(match_fragment)
@@ -697,75 +771,17 @@ class TreasureMapMatcher:
             query_weights,
             np.linspace(0.88, 1.12, self.REFINE_SCALE_STEPS),
         )
-        t_query_ready = time.perf_counter()
 
         coarse_scored: list[tuple[float, _RefEntry]] = []
-        best_coarse = -1.0
-        second_coarse = -1.0
-        best_coarse_entry: _RefEntry | None = None
-        allow_early_exit = not full_scan and len(entries) <= self.FULL_SCAN_REF_THRESHOLD
-        t_coarse_start = time.perf_counter()
-
         for entry in entries:
             score = self._coarse_score_optimized(coarse_query_scales, entry)
             coarse_scored.append((score, entry))
-            if score > best_coarse:
-                second_coarse = best_coarse
-                best_coarse = score
-                best_coarse_entry = entry
-            elif score > second_coarse:
-                second_coarse = score
-
-            if (
-                allow_early_exit
-                and best_coarse >= self.EARLY_EXIT_SCORE
-                and best_coarse - max(second_coarse, 0.0) >= self.EARLY_EXIT_MARGIN
-                and best_coarse_entry is not None
-            ):
-                refined = self._refine_score_optimized(
-                    refine_query_scales,
-                    query_feat,
-                    query_weights,
-                    best_coarse_entry,
-                )
-                if refined[0] >= self.CONFIDENT_SCORE:
-                    marker_dist = self._marker_distance(best_coarse_entry, query_rel)
-                    adjusted = self._marker_adjusted_score(
-                        refined[0], best_coarse_entry, query_rel
-                    )
-                    logger.debug(
-                        "timing[_score_zone] zone=%s entries=%d EARLY_EXIT "
-                        "load/entries=%.1fms query_prep=%.1fms coarse(partial)=%.1fms",
-                        zone_id,
-                        len(entries),
-                        (t_entries_ready - t0) * 1000,
-                        (t_query_ready - t_entries_ready) * 1000,
-                        (time.perf_counter() - t_coarse_start) * 1000,
-                    )
-                    return (
-                        [
-                            (
-                                adjusted,
-                                refined[0],
-                                refined[1],
-                                refined[2],
-                                best_coarse_entry,
-                                marker_dist,
-                            )
-                        ],
-                        query_rel,
-                    )
-
-        t_coarse_end = time.perf_counter()
         coarse_scored.sort(key=lambda item: item[0], reverse=True)
-        refine_top_k = (
-            len(entries)
-            if full_scan
-            else min(len(entries), self.REFINE_TOP_K)
-        )
+
         if full_scan:
             finalists = [entry for _score, entry in coarse_scored]
         else:
+            refine_top_k = min(len(entries), self.REFINE_TOP_K)
             finalists = [entry for _score, entry in coarse_scored[:refine_top_k]]
             if query_rel is not None:
                 seen = {entry.path for entry in finalists}
@@ -781,7 +797,6 @@ class TreasureMapMatcher:
                     finalists.append(entry)
                     seen.add(entry.path)
 
-        t_refine_start = time.perf_counter()
         refined_rows: list[tuple[float, float, float, _RefEntry]] = []
         for entry in finalists:
             combined, ccorr, ssim = self._refine_score_optimized(
@@ -795,12 +810,6 @@ class TreasureMapMatcher:
         terrain_clustered = self._terrain_scores_clustered(
             [combined for combined, _ccorr, _ssim, _entry in refined_rows]
         )
-        if terrain_clustered and is_debug():
-            logger.debug(
-                "ref marker cluster mode zone=%s (terrain top margin <= %.3f)",
-                zone_id,
-                self.TERRAIN_CLUSTER_MARGIN,
-            )
 
         scored: list[tuple[float, float, float, float, _RefEntry, float]] = []
         for combined, ccorr, ssim, entry in refined_rows:
@@ -813,22 +822,8 @@ class TreasureMapMatcher:
             marker_dist = self._marker_distance(entry, query_rel)
             scored.append((adjusted, combined, ccorr, ssim, entry, marker_dist))
 
-        t_refine_end = time.perf_counter()
         scored.sort(key=lambda item: item[0], reverse=True)
-        logger.debug(
-            "timing[_score_zone] zone=%s entries=%d finalists=%d full_scan=%s | "
-            "load/entries=%.1fms query_prep=%.1fms coarse=%.1fms refine=%.1fms TOTAL=%.1fms",
-            zone_id,
-            len(entries),
-            len(finalists),
-            full_scan,
-            (t_entries_ready - t0) * 1000,
-            (t_query_ready - t_entries_ready) * 1000,
-            (t_coarse_end - t_coarse_start) * 1000,
-            (t_refine_end - t_refine_start) * 1000,
-            (time.perf_counter() - t0) * 1000,
-        )
-        return scored, query_rel
+        return scored
 
     def _pick_by_terrain_margin(
         self,
@@ -1007,6 +1002,8 @@ class TreasureMapMatcher:
         terrain_clustered: bool = False,
     ) -> float:
         """지형 유사도 + X 상대 위치 일치 보정"""
+        if not cls.MARKER_ADJUST_ENABLED:
+            return terrain_score
         if query_rel is None or entry.marker_rel is None:
             return terrain_score
         dist = cls._marker_distance(entry, query_rel)

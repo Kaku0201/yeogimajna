@@ -7,8 +7,8 @@ import numpy as np
 
 CCORR_WEIGHT = 0.6
 SSIM_WEIGHT = 0.4
-TERRAIN_CCORR_WEIGHT = 0.20
-TERRAIN_SSIM_WEIGHT = 0.80
+TERRAIN_CCORR_WEIGHT = 0.45
+TERRAIN_SSIM_WEIGHT = 0.55
 
 
 def align_gray(a: np.ndarray, b: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -34,14 +34,20 @@ def align_gray(a: np.ndarray, b: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return a_crop, b_crop
 
 
-def ccorr_score(a: np.ndarray, b: np.ndarray) -> float:
-    """cv2.matchTemplate TM_CCORR_NORMED (동일 크기)"""
+def ccorr_score(
+    a: np.ndarray,
+    b: np.ndarray,
+    method: int = cv2.TM_CCORR_NORMED,
+) -> float:
+    """cv2.matchTemplate 정규화 상관 (동일 크기).
+
+    method=TM_CCOEFF_NORMED면 평균을 빼고 비교 → 양피지 공통 밝기 성분이 제거돼
+    지형 패턴 차이가 더 크게 벌어진다(변별력↑).
+    """
     a_aligned, b_aligned = align_gray(a, b)
     if a_aligned.size == 0:
         return -1.0
-    return float(
-        cv2.matchTemplate(a_aligned, b_aligned, cv2.TM_CCORR_NORMED)[0, 0]
-    )
+    return float(cv2.matchTemplate(a_aligned, b_aligned, method)[0, 0])
 
 
 def ssim_score(a: np.ndarray, b: np.ndarray) -> float:
@@ -132,13 +138,20 @@ def combined_similarity(
     ccorr_w: float = CCORR_WEIGHT,
     ssim_w: float = SSIM_WEIGHT,
     align: bool = True,
+    ccorr_method: int = cv2.TM_CCORR_NORMED,
 ) -> tuple[float, float, float]:
-    """CCORR + SSIM 결합 → (combined, ccorr, ssim). align=True면 위치 보정 후 비교."""
+    """CCORR + SSIM 결합 → (combined, ccorr, ssim). align=True면 위치 보정 후 비교.
+
+    ccorr_method=TM_CCOEFF_NORMED면 제로평균 상관을 쓰고 음수(불일치)는 0으로 클램프.
+    """
     a_aligned, b_aligned = align_gray(a, b)
     if align:
         b_aligned = _phase_align(a_aligned, b_aligned)
 
-    score_ccorr = ccorr_score(a_aligned, b_aligned)
+    score_ccorr = ccorr_score(a_aligned, b_aligned, ccorr_method)
+    if ccorr_method == cv2.TM_CCOEFF_NORMED and score_ccorr > -1.0:
+        # CCOEFF는 -1~1 → 불일치(음수)는 0으로 눌러 mismatch 신호로만 사용
+        score_ccorr = max(0.0, score_ccorr)
     score_ssim = (
         ssim_score_weighted(a_aligned, b_aligned, ssim_weight)
         if ssim_weight is not None
@@ -155,11 +168,24 @@ def combined_similarity(
     return combined, score_ccorr, score_ssim
 
 
+_BANDPASS_LOW_SIGMA = 4.0    # 이보다 미세한 고주파(양피지 구김·글자·빗금) 제거
+_BANDPASS_HIGH_SIGMA = 16.0  # 이보다 완만한 초저주파(비네팅·전역 밝기 편차) 제거
+
+
 def enhance_terrain_features(gray: np.ndarray) -> np.ndarray:
-    """등고선·빗금 윤곽 강조 — 양피지 질감 영향 축소"""
-    blur = cv2.GaussianBlur(gray, (3, 3), 0)
-    edges = cv2.Canny(blur, 35, 110)
-    return cv2.addWeighted(blur, 0.30, edges, 0.70, 0)
+    """지형 구조(해안선·지형 경계)만 남기는 밴드패스 표현.
+
+    인게임 캡처의 양피지 구김/글자/빗금은 고주파 노이즈라 Canny 엣지로 잡으면
+    실제 해안선보다 노이즈가 지배해 매칭이 어긋난다. 대신 두 가우시안 블러의 차
+    (Difference of Gaussians)로 밴드패스를 만들어, 비네팅 같은 초저주파와
+    구김 같은 고주파를 모두 제거하고 해안선 스케일 구조만 남긴다.
+    """
+    g = gray.astype(np.float32)
+    low = cv2.GaussianBlur(g, (0, 0), sigmaX=_BANDPASS_LOW_SIGMA)
+    high = cv2.GaussianBlur(g, (0, 0), sigmaX=_BANDPASS_HIGH_SIGMA)
+    band = low - high
+    band = cv2.normalize(band, None, 0.0, 255.0, cv2.NORM_MINMAX)
+    return band.astype(np.uint8)
 
 
 def terrain_similarity(
@@ -184,6 +210,9 @@ def terrain_similarity(
     )
 
 
+_TERRAIN_CCORR_METHOD = cv2.TM_CCOEFF_NORMED
+
+
 def terrain_similarity_from_features(
     a_feat: np.ndarray,
     b_feat: np.ndarray,
@@ -200,6 +229,7 @@ def terrain_similarity_from_features(
         ccorr_w=ccorr_w,
         ssim_w=ssim_w,
         align=False,
+        ccorr_method=_TERRAIN_CCORR_METHOD,
     )
 
 
