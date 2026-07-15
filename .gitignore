@@ -9,7 +9,8 @@ vendor/tesseract/*.dll
 vendor/tesseract/tessdata/
 assets/waymarks.ico
 
-# 디버그
+# 디버그 산출물
+debug_qc/
 debug_query.png
 debug_*.png
 debug_party/

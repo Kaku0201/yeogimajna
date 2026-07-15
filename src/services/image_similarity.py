@@ -203,6 +203,11 @@ def terrain_similarity_from_features(
     )
 
 
+def phase_align_gray(base: np.ndarray, other: np.ndarray) -> np.ndarray:
+    """phaseCorrelate로 other를 base에 맞게 평행 이동 (spot별 X 위치 차 보정)"""
+    return _phase_align(base, other)
+
+
 def _phase_align(base: np.ndarray, other: np.ndarray) -> np.ndarray:
     """phaseCorrelate로 other를 base에 맞게 평행 이동 (spot별 X 위치 차 보정)"""
     if base.size == 0 or base.shape != other.shape:

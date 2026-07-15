@@ -5,8 +5,8 @@
     "party_sizes": [
       8
     ],
-    "marker_rx": 0.3727,
-    "marker_ry": 0.5985
+    "marker_rx": 0.4995,
+    "marker_ry": 0.4926
   },
   "party8/15.71_19.46.png": {
     "x": 15.71,
@@ -14,8 +14,8 @@
     "party_sizes": [
       8
     ],
-    "marker_rx": 0.5,
-    "marker_ry": 0.5073
+    "marker_rx": 0.5006,
+    "marker_ry": 0.4931
   },
   "party8/21.23_29.04.png": {
     "x": 21.23,
@@ -23,8 +23,8 @@
     "party_sizes": [
       8
     ],
-    "marker_rx": 0.6398,
-    "marker_ry": 0.562
+    "marker_rx": 0.1537,
+    "marker_ry": 0.5569
   },
   "solo/10.72_23.57.png": {
     "x": 10.72,
@@ -32,8 +32,8 @@
     "party_sizes": [
       1
     ],
-    "marker_rx": 0.5031,
-    "marker_ry": 0.5073
+    "marker_rx": 0.5001,
+    "marker_ry": 0.4908
   },
   "solo/13.87_21.61.png": {
     "x": 13.87,
@@ -41,8 +41,8 @@
     "party_sizes": [
       1
     ],
-    "marker_rx": 0.5,
-    "marker_ry": 0.5037
+    "marker_rx": 0.6085,
+    "marker_ry": 0.3162
   },
   "solo/15.79_23.54.png": {
     "x": 15.79,
@@ -50,8 +50,8 @@
     "party_sizes": [
       1
     ],
-    "marker_rx": 0.264,
-    "marker_ry": 0.2883
+    "marker_rx": 0.6592,
+    "marker_ry": 0.3883
   },
   "solo/16.32_17.77.png": {
     "x": 16.32,
@@ -59,8 +59,8 @@
     "party_sizes": [
       1
     ],
-    "marker_rx": 0.5062,
-    "marker_ry": 0.511
+    "marker_rx": 0.4105,
+    "marker_ry": 0.3679
   },
   "solo/17.65_20.72.png": {
     "x": 17.65,
@@ -68,8 +68,8 @@
     "party_sizes": [
       1
     ],
-    "marker_rx": 0.4969,
-    "marker_ry": 0.5037
+    "marker_rx": 0.5012,
+    "marker_ry": 0.4923
   },
   "solo/19.38_18.25.png": {
     "x": 19.38,
@@ -77,8 +77,8 @@
     "party_sizes": [
       1
     ],
-    "marker_rx": 0.5031,
-    "marker_ry": 0.5073
+    "marker_rx": 0.5028,
+    "marker_ry": 0.4869
   },
   "solo/20.99_28.05.png": {
     "x": 20.99,
@@ -86,8 +86,8 @@
     "party_sizes": [
       1
     ],
-    "marker_rx": 0.5,
-    "marker_ry": 0.5
+    "marker_rx": 0.7642,
+    "marker_ry": 0.4176
   },
   "solo/21.27_30.13.png": {
     "x": 21.27,
@@ -95,8 +95,8 @@
     "party_sizes": [
       1
     ],
-    "marker_rx": 0.6265,
-    "marker_ry": 0.2664
+    "marker_rx": 0.3214,
+    "marker_ry": 0.313
   },
   "solo/22.37_25.34.png": {
     "x": 22.37,
@@ -104,8 +104,8 @@
     "party_sizes": [
       1
     ],
-    "marker_rx": 0.4969,
-    "marker_ry": 0.5073
+    "marker_rx": 0.3655,
+    "marker_ry": 0.3528
   },
   "solo/22.76_26.94.png": {
     "x": 22.76,
@@ -113,8 +113,8 @@
     "party_sizes": [
       1
     ],
-    "marker_rx": 0.4379,
-    "marker_ry": 0.792
+    "marker_rx": 0.1605,
+    "marker_ry": 0.3352
   },
   "solo/24.58_21.2.png": {
     "x": 24.58,
@@ -122,8 +122,8 @@
     "party_sizes": [
       1
     ],
-    "marker_rx": 0.4938,
-    "marker_ry": 0.5037
+    "marker_rx": 0.5004,
+    "marker_ry": 0.4935
   },
   "solo/24.59_28.37.png": {
     "x": 24.59,
@@ -131,8 +131,8 @@
     "party_sizes": [
       1
     ],
-    "marker_rx": 0.5062,
-    "marker_ry": 0.5073
+    "marker_rx": 0.4999,
+    "marker_ry": 0.4875
   },
   "solo/24.77_32.12.png": {
     "x": 24.77,
@@ -140,8 +140,8 @@
     "party_sizes": [
       1
     ],
-    "marker_rx": 0.2422,
-    "marker_ry": 0.3066
+    "marker_rx": 0.5005,
+    "marker_ry": 0.4908
   },
   "solo/25.54_21.13.png": {
     "x": 25.54,
@@ -149,8 +149,8 @@
     "party_sizes": [
       1
     ],
-    "marker_rx": 0.5,
-    "marker_ry": 0.5
+    "marker_rx": 0.4998,
+    "marker_ry": 0.4866
   },
   "solo/25.82_20.29.png": {
     "x": 25.82,
@@ -158,8 +158,8 @@
     "party_sizes": [
       1
     ],
-    "marker_rx": 0.5,
-    "marker_ry": 0.5073
+    "marker_rx": 0.4995,
+    "marker_ry": 0.4923
   },
   "solo/28.54_20.73.png": {
     "x": 28.54,
@@ -167,8 +167,8 @@
     "party_sizes": [
       1
     ],
-    "marker_rx": 0.5031,
-    "marker_ry": 0.5073
+    "marker_rx": 0.4988,
+    "marker_ry": 0.4931
   },
   "solo/28.8_22.7.png": {
     "x": 28.8,
@@ -176,8 +176,8 @@
     "party_sizes": [
       1
     ],
-    "marker_rx": 0.5031,
-    "marker_ry": 0.5073
+    "marker_rx": 0.6938,
+    "marker_ry": 0.3888
   },
   "solo/30.37_21.44.png": {
     "x": 30.37,
@@ -185,7 +185,7 @@
     "party_sizes": [
       1
     ],
-    "marker_rx": 0.4969,
-    "marker_ry": 0.5037
+    "marker_rx": 0.5031,
+    "marker_ry": 0.4897
   }
 }

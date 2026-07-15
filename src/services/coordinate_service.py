@@ -212,8 +212,9 @@ class CoordinateService:
     MAP_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp")
     EXPANSION_FOLDERS = ("신생", "창천", "홍련", "칠흑", "효월", "황금")
 
-    MAP_KIND_MATCH = "match"
-    MAP_KIND_DETAIL = "detail"
+    # 상세지도 캡처 기본 해상도 (maps/{확장팩}/{zone_id}.png)
+    CAPTURE_MAP_WIDTH = 1627
+    CAPTURE_MAP_HEIGHT = 1627
 
     def _expansion_dir_for_zone(self, zone_id: str) -> Path | None:
         """zones.json expansion → maps/{확장팩}/ 경로"""
@@ -232,20 +233,17 @@ class CoordinateService:
                     return folder
         return None
 
-    def get_match_map_path(self, zone_id: str, map_index: int = 1) -> Path:
-        """보물지도 모양 매칭용 이미지"""
-        return self.get_map_image_path(zone_id, map_index, kind=self.MAP_KIND_MATCH)
-
     def get_detail_map_path(self, zone_id: str, map_index: int = 1) -> Path:
-        """좌표 표시용 상세 지도 (지역당 1장 공유)"""
+        """좌표 표시용 상세 지도 — maps/{확장팩}/{zone_id}.png"""
         detail_id = self.resolve_detail_zone_id(zone_id)
-        path = self.get_map_image_path(detail_id, map_index, kind=self.MAP_KIND_DETAIL)
+        path = self.get_map_image_path(detail_id, map_index)
         if path.exists():
             return path
-        return self.get_map_image_path(zone_id, map_index, kind=self.MAP_KIND_DETAIL)
+        return self.get_map_image_path(zone_id, map_index)
 
-    # FFXIV 지도: 좌표 1~41, Y는 남쪽(아래)으로 증가, 1024 텍스처에 여백 있음
+    # FFXIV 지도: 좌표 1~41, Y는 남쪽(아래)으로 증가
     FFXIV_MAP_UNIT = 40.96  # 4096 / 100
+    DEFAULT_DETAIL_INSET = 0.0
 
     def _resolve_detail_transform(
         self,
@@ -259,12 +257,17 @@ class CoordinateService:
         if zone.get("detail_offset_x") is not None:
             offset_x = float(zone["detail_offset_x"])
             offset_y = float(zone.get("detail_offset_y", 0.0))
-            inner_w = float(
-                zone.get("detail_inner_width", display_width)
-            )
-            inner_h = float(
-                zone.get("detail_inner_height", display_height)
-            )
+            ref_w = float(zone.get("detail_width") or display_width)
+            ref_h = float(zone.get("detail_height") or display_height)
+            inner_w = float(zone.get("detail_inner_width") or ref_w)
+            inner_h = float(zone.get("detail_inner_height") or ref_h)
+            if ref_w > 0 and ref_h > 0:
+                scale_x = display_width / ref_w
+                scale_y = display_height / ref_h
+                offset_x *= scale_x
+                offset_y *= scale_y
+                inner_w *= scale_x
+                inner_h *= scale_y
             return unit, offset_x, offset_y, inner_w, inner_h
 
         for pos in zone.get("positions", []):
@@ -278,7 +281,7 @@ class CoordinateService:
             offset_y = float(py_ref) - (gy - 1.0) / unit * display_height
             return unit, offset_x, offset_y, float(display_width), float(display_height)
 
-        inset = float(zone.get("detail_inset", 0.0))
+        inset = float(zone.get("detail_inset", self.DEFAULT_DETAIL_INSET))
         if inset > 0:
             offset_x = display_width * inset
             offset_y = display_height * inset
@@ -301,11 +304,25 @@ class CoordinateService:
         display_height: int,
     ) -> tuple[int, int]:
         """게임 좌표 → 상세 지도 픽셀 (FFXIV 1-based 좌표계)"""
+        px, py = self.game_to_pixel_float(
+            zone, game_x, game_y, display_width, display_height
+        )
+        return int(round(px)), int(round(py))
+
+    def game_to_pixel_float(
+        self,
+        zone: dict,
+        game_x: float,
+        game_y: float,
+        display_width: int,
+        display_height: int,
+    ) -> tuple[float, float]:
+        """게임 좌표 → 상세 지도 픽셀 (부동소수, 서브픽셀 배치용)"""
         unit, offset_x, offset_y, inner_w, inner_h = self._resolve_detail_transform(
             zone, display_width, display_height
         )
-        px = int(offset_x + ((game_x - 1.0) / unit) * inner_w)
-        py = int(offset_y + ((game_y - 1.0) / unit) * inner_h)
+        px = offset_x + ((game_x - 1.0) / unit) * inner_w
+        py = offset_y + ((game_y - 1.0) / unit) * inner_h
         return px, py
 
     def get_detail_image_size(
@@ -323,10 +340,10 @@ class CoordinateService:
         zone = self.get_zone(detail_id) or self.get_zone(zone_id)
         if zone is not None:
             return (
-                int(zone.get("detail_width", 1024)),
-                int(zone.get("detail_height", 1024)),
+                int(zone.get("detail_width", self.CAPTURE_MAP_WIDTH)),
+                int(zone.get("detail_height", self.CAPTURE_MAP_HEIGHT)),
             )
-        return 1024, 1024
+        return self.CAPTURE_MAP_WIDTH, self.CAPTURE_MAP_HEIGHT
 
     def game_to_detail_pixel(
         self,
@@ -336,9 +353,20 @@ class CoordinateService:
         map_index: int = 1,
     ) -> tuple[int, int]:
         """상세 지도 원본 해상도 기준 픽셀 좌표"""
+        px, py = self.game_to_detail_pixel_float(zone, game_x, game_y, map_index)
+        return int(round(px)), int(round(py))
+
+    def game_to_detail_pixel_float(
+        self,
+        zone: dict,
+        game_x: float,
+        game_y: float,
+        map_index: int = 1,
+    ) -> tuple[float, float]:
+        """상세 지도 원본 해상도 기준 픽셀 좌표 (부동소수)"""
         zone_id = str(zone.get("detail_zone_id") or zone.get("id", ""))
         width, height = self.get_detail_image_size(zone_id, map_index)
-        return self.game_to_pixel(zone, game_x, game_y, width, height)
+        return self.game_to_pixel_float(zone, game_x, game_y, width, height)
 
     def refine_treasure_coords(
         self,
@@ -404,8 +432,8 @@ class CoordinateService:
         display_height: int | None = None,
     ) -> tuple[float, float]:
         """상세 지도 픽셀 → 게임 좌표"""
-        width = int(display_width or zone.get("detail_width", 1024))
-        height = int(display_height or zone.get("detail_height", 1024))
+        width = int(display_width or zone.get("detail_width", self.CAPTURE_MAP_WIDTH))
+        height = int(display_height or zone.get("detail_height", self.CAPTURE_MAP_HEIGHT))
         unit, offset_x, offset_y, inner_w, inner_h = self._resolve_detail_transform(
             zone, width, height
         )
@@ -414,16 +442,16 @@ class CoordinateService:
         return round(game_x, 1), round(game_y, 1)
 
     def get_map_image_path(
-        self, zone_id: str, map_index: int = 1, kind: str = MAP_KIND_DETAIL
+        self, zone_id: str, map_index: int = 1
     ) -> Path:
-        """zone_id에 해당하는 지도 이미지 — maps/{확장팩}/{zone_id}.png"""
+        """zone_id에 해당하는 상세 지도 — maps/{확장팩}/{zone_id}.png"""
         expansion_dir = self._expansion_dir_for_zone(zone_id)
         default = (
             (expansion_dir or self.maps_dir / "...") / f"{zone_id}.png"
         )
 
         if expansion_dir is not None:
-            flat = self._collect_flat_map_paths(expansion_dir, zone_id, kind)
+            flat = self._collect_flat_map_paths(expansion_dir, zone_id)
             if flat:
                 if map_index > 1:
                     for path in flat:
@@ -432,60 +460,21 @@ class CoordinateService:
                 flat.sort(key=lambda p: self._map_sort_key(p.stem, zone_id))
                 return flat[0]
 
-        if not self.maps_dir.exists():
-            return default
-
-        legacy = self._collect_legacy_map_paths(self.maps_dir, zone_id, kind)
-        if legacy:
-            if map_index > 1:
-                for path in legacy:
-                    if self._extract_map_index(path.stem, zone_id) == map_index:
-                        return path
-            legacy.sort(key=lambda p: self._map_sort_key(p.stem, zone_id))
-            return legacy[0]
-
         return default
 
     def _collect_flat_map_paths(
-        self, expansion_dir: Path, zone_id: str, kind: str
+        self, expansion_dir: Path, zone_id: str
     ) -> list[Path]:
-        """maps/{확장팩}/ 직접 배치 (detail: id.png, match: id_01.png)"""
+        """maps/{확장팩}/{zone_id}.png"""
         found: list[Path] = []
         for path in expansion_dir.iterdir():
             if not path.is_file():
                 continue
             if path.suffix.lower() not in self.MAP_IMAGE_EXTENSIONS:
                 continue
-            stem = path.stem
-            if kind == self.MAP_KIND_DETAIL:
-                if stem == zone_id:
-                    found.append(path)
-            elif re.fullmatch(rf"{re.escape(zone_id)}_\d+", stem):
+            if path.stem == zone_id:
                 found.append(path)
         return found
-
-    def _collect_legacy_map_paths(
-        self, maps_dir: Path, zone_id: str, kind: str
-    ) -> list[Path]:
-        """구 match/detail/ 하위 폴더 호환"""
-        typed: list[Path] = []
-        legacy: list[Path] = []
-
-        for path in maps_dir.rglob("*"):
-            if not path.is_file():
-                continue
-            if path.suffix.lower() not in self.MAP_IMAGE_EXTENSIONS:
-                continue
-            if not self._map_filename_matches_zone(path.stem, zone_id):
-                continue
-
-            parts = set(path.parts)
-            if kind in parts:
-                typed.append(path)
-            elif self.MAP_KIND_MATCH not in parts and self.MAP_KIND_DETAIL not in parts:
-                legacy.append(path)
-
-        return typed or legacy
 
     @staticmethod
     def _extract_map_index(stem: str, zone_id: str) -> Optional[int]:
@@ -506,14 +495,3 @@ class CoordinateService:
         if match:
             return (2, int(match.group(1)))
         return (3, 0)
-
-    @staticmethod
-    def _map_filename_matches_zone(stem: str, zone_id: str) -> bool:
-        """파일명이 zone_id와 일치하는지 확인"""
-        if stem == zone_id:
-            return True
-        if re.fullmatch(rf"{re.escape(zone_id)}_\d+", stem):
-            return True
-        if re.fullmatch(rf"\d+_{re.escape(zone_id)}", stem):
-            return True
-        return False

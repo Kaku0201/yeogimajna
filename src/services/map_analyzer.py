@@ -33,6 +33,7 @@ class RematchContext:
     zone_hint: dict
     party_size: int | None
     capture_image: Image.Image | None = None
+    party_size_locked: bool = False
 
 
 class MapAnalyzer:
@@ -44,6 +45,9 @@ class MapAnalyzer:
 
     MIN_FOCUS_SIZE = 80
     BANNER_MIN_SCORE = 0.55
+    REF_MATCH_TOP_K = 5
+    TERRAIN_ZONE_MIN_SCORE = TreasureMapMatcher.TERRAIN_ZONE_CONFIDENT_SCORE
+    TERRAIN_ZONE_MIN_MARGIN = TreasureMapMatcher.TERRAIN_ZONE_MIN_MARGIN
 
     def __init__(
         self,
@@ -64,7 +68,7 @@ class MapAnalyzer:
         self.user_learn = UserRefLearnService()
         self.match_stats = MatchStatsService()
         self._rematch_context: RematchContext | None = None
-        self._party_size_by_zone: dict[str, int] = self.user_learn.get_party_sizes()
+        self._party_size_by_zone: dict[str, int] = {}
 
     def capture_region(self, rect: tuple[int, int, int, int]) -> Image.Image:
         """지정 영역 스크린샷 캡처 (x, y, width, height)"""
@@ -165,7 +169,16 @@ class MapAnalyzer:
             import numpy as np
 
             probe_rgb = np.array(best_candidate.convert("RGB"))
-            if not self.capture_processor._top_header_has_title_ink(probe_rgb):
+            map_probe = best_map_window or best_candidate
+            terrain_zone = self._try_resolve_zone_from_terrain(map_probe)
+            if terrain_zone is not None:
+                locked_zone = terrain_zone
+                locked_score = self.TERRAIN_ZONE_MIN_SCORE
+                logger.info(
+                    "지형 매칭으로 지역 확정: %s",
+                    locked_zone.get("id"),
+                )
+            elif not self.capture_processor._top_header_has_title_ink(probe_rgb):
                 raise ValueError(
                     "상단 지역명이 잘렸습니다.\n"
                     "• 네모를 위로 조금 올려 지역명(예: 라비린토스)이 상단에 보이게 해 주세요\n"
@@ -214,6 +227,12 @@ class MapAnalyzer:
         # 2) 파티 인원
         party_size, party_uncertain = self._resolve_party_size(
             locked_zone["id"], raw, map_for_ocr
+        )
+        party_size, party_uncertain = self._confirm_party_with_map_refs(
+            locked_zone["id"],
+            map_for_match,
+            party_size,
+            party_uncertain,
         )
         t_party = time.perf_counter()
         logger.debug(
@@ -276,6 +295,31 @@ class MapAnalyzer:
                     return best_zone, best_score, best_text
 
         return best_zone, best_score, best_text
+
+    def _try_resolve_zone_from_terrain(
+        self, map_window: Image.Image
+    ) -> Optional[dict]:
+        """OCR 실패 시 전 존 지형 비교로 zone 후보 확정"""
+        zone_id, score, margin = self.map_matcher.identify_zone_from_terrain(
+            map_window
+        )
+        if zone_id is None:
+            logger.debug(
+                "terrain_zone fallback 실패: score=%.3f margin=%.3f",
+                score,
+                margin,
+            )
+            return None
+        zone = self.coordinate_service.get_zone(zone_id)
+        if zone is None:
+            return None
+        logger.debug(
+            "terrain_zone fallback 성공: %s score=%.3f margin=%.3f",
+            zone_id,
+            score,
+            margin,
+        )
+        return zone
 
     def _analyze_once(
         self,
@@ -371,7 +415,10 @@ class MapAnalyzer:
             zone_hint=zone_hint,
             party_size=party_size,
             capture_image=raw.copy(),
+            party_size_locked=party_size in (1, 8) and not party_uncertain,
         )
+        if party_size in (1, 8) and not party_uncertain:
+            self._store_confirmed_party_size(zone_hint["id"], party_size)
         result = self._resolve_coordinates(
             map_window,
             zone_hint,
@@ -509,8 +556,18 @@ class MapAnalyzer:
                     cached,
                 )
             else:
-                logger.debug("party_size 캐시 %s -> %s", zone_id, cached)
+                logger.debug("party_size 캐시 %s -> %s (재감지 실패)", zone_id, cached)
             return cached, True
+
+        learned_hint = self.user_learn.get_party_sizes().get(zone_id)
+        if learned_hint in (1, 8):
+            if is_debug():
+                logger.debug(
+                    "[party] resolve zone=%s party_size=%s uncertain=True via=learn_hint",
+                    zone_id,
+                    learned_hint,
+                )
+            return learned_hint, True
 
         if is_debug():
             logger.debug(
@@ -519,6 +576,79 @@ class MapAnalyzer:
             )
         return None, True
 
+    def _store_confirmed_party_size(self, zone_id: str, party_size: int | None) -> None:
+        if party_size in (1, 8):
+            self._party_size_by_zone[zone_id] = party_size
+
+    def _confirm_party_with_map_refs(
+        self,
+        zone_id: str,
+        map_window: Image.Image | None,
+        party_size: int | None,
+        uncertain: bool,
+    ) -> tuple[int | None, bool]:
+        """16칸 지역 — 아이콘 감지 후 solo/party8 ref coarse로 인원 재확인"""
+        if map_window is None or not self.map_matcher.has_split_party_refs(zone_id):
+            return party_size, uncertain
+
+        solo_score, party8_score = self.map_matcher.compare_party_folder_coarse(
+            map_window, zone_id
+        )
+        if solo_score < 0 and party8_score < 0:
+            return party_size, uncertain
+
+        margin = 0.035
+        trace = self.capture_processor.last_party_trace
+        icon_reason = trace.reason if trace else ""
+
+        if solo_score - party8_score >= margin:
+            if party_size != 1:
+                logger.debug(
+                    "party ref probe %s -> 1 (solo=%.3f party8=%.3f icon=%s)",
+                    party_size,
+                    solo_score,
+                    party8_score,
+                    icon_reason,
+                )
+            self._store_confirmed_party_size(zone_id, 1)
+            return 1, False
+        if party8_score - solo_score >= margin:
+            if party_size != 8:
+                logger.debug(
+                    "party ref probe %s -> 8 (solo=%.3f party8=%.3f icon=%s)",
+                    party_size,
+                    solo_score,
+                    party8_score,
+                    icon_reason,
+                )
+            self._store_confirmed_party_size(zone_id, 8)
+            return 8, False
+
+        if party_size == 8 and solo_score > party8_score + 0.015:
+            logger.debug(
+                "party ref probe weak8 -> 1 (solo=%.3f party8=%.3f icon=%s)",
+                solo_score,
+                party8_score,
+                icon_reason,
+            )
+            self._store_confirmed_party_size(zone_id, 1)
+            return 1, False
+        if party_size == 1 and party8_score > solo_score + 0.015:
+            logger.debug(
+                "party ref probe weak1 -> 8 (solo=%.3f party8=%.3f)",
+                solo_score,
+                party8_score,
+            )
+            self._store_confirmed_party_size(zone_id, 8)
+            return 8, False
+
+        if uncertain and party_size not in (1, 8):
+            chosen = 1 if solo_score >= party8_score else 8
+            self._store_confirmed_party_size(zone_id, chosen)
+            return chosen, False
+
+        return party_size, uncertain
+
     def rematch_refs(self, excluded_ref_names: list[str]) -> RecognitionResult:
         """이미 표시한 ref 후보를 제외하고 동일 캡처로 재검색"""
         ctx = self._rematch_context
@@ -526,25 +656,26 @@ class MapAnalyzer:
             raise ValueError("재검색할 캡처가 없습니다. 먼저 보물지도를 인식하세요.")
 
         exclude_set = set(excluded_ref_names)
-        party_size = ctx.party_size
-        if party_size is None and ctx.capture_image is not None:
-            party_size, _uncertain = self._resolve_party_size(
+        if ctx.party_size_locked and ctx.party_size in (1, 8):
+            party_size = ctx.party_size
+        elif ctx.party_size in (1, 8):
+            party_size = ctx.party_size
+        else:
+            party_size, _party_uncertain = self._resolve_party_size(
                 ctx.zone_hint["id"],
-                ctx.capture_image,
+                ctx.capture_image or ctx.map_window,
                 ctx.map_window,
             )
             ctx.party_size = party_size
 
-        confident, ranked, resolved_party = self.map_matcher.match_with_ranked(
+        confident, ranked, _resolved_party = self.map_matcher.match_with_ranked(
             ctx.map_window,
             ctx.zone_hint["id"],
             party_size=party_size,
-            top_k=3,
+            top_k=self.REF_MATCH_TOP_K,
             exclude_ref_names=exclude_set,
             full_scan=True,
         )
-        if resolved_party in (1, 8):
-            ctx.party_size = resolved_party
         if not ranked:
             raise ValueError(
                 "더 이상 표시할 ref 후보가 없습니다.\n"
@@ -553,14 +684,15 @@ class MapAnalyzer:
 
         result = self._finalize_ref_result(
             ctx.zone_hint,
-            ctx.party_size,
+            party_size,
             confident,
             ranked,
             excluded_ref_names=list(excluded_ref_names),
         )
         logger.debug(
-            "ref 재검색 %s 후보 %s (제외 %d개)",
+            "ref 재검색 %s party=%s 후보 %s (제외 %d개)",
             ctx.zone_hint["id"],
+            party_size,
             [m.ref_name for m in ranked],
             len(exclude_set),
         )
@@ -651,9 +783,23 @@ class MapAnalyzer:
         """ref DB 우선 — 학습 캐시 → ref 스캔 → detail(최후)"""
         exclude_set = set(excluded_ref_names or [])
 
+        scan_party = party_size
+        zone_id = zone_hint["id"]
+        if (
+            party_uncertain
+            and scan_party in (1, 8)
+            and self.map_matcher.has_split_party_refs(zone_id)
+        ):
+            # 8인 테스트 후 1인 지도 — 캐시 오염 시 solo/party8 동시 스캔
+            scan_party = None
+            logger.debug(
+                "party_size 불확실 → solo/party8 혼합 ref 스캔 %s",
+                zone_id,
+            )
+
         if not exclude_set:
             learned = self.user_learn.try_fast_match(
-                zone_hint["id"], map_window
+                zone_hint["id"], map_window, party_size=scan_party or party_size
             )
             if learned is not None:
                 result = self._build_result_from_learned(zone_hint, learned)
@@ -669,25 +815,32 @@ class MapAnalyzer:
         confident_match, ranked, resolved_party = self.map_matcher.match_with_ranked(
             map_window,
             zone_hint["id"],
-            party_size=party_size,
-            top_k=3,
+            party_size=scan_party,
+            top_k=self.REF_MATCH_TOP_K,
             exclude_ref_names=exclude_set or None,
             full_scan=full_scan,
         )
         selected_party_size = resolved_party if resolved_party in (1, 8) else party_size
         if selected_party_size in (1, 8):
-            self._party_size_by_zone[zone_hint["id"]] = selected_party_size
-            if self._rematch_context is not None:
-                self._rematch_context.party_size = selected_party_size
+            if exclude_set:
+                selected_party_size = party_size if party_size in (1, 8) else selected_party_size
+            else:
+                self._party_size_by_zone[zone_hint["id"]] = selected_party_size
+                if self._rematch_context is not None:
+                    self._rematch_context.party_size = selected_party_size
 
         alternate_party = self._alternate_party_size(selected_party_size)
-        # OCR로 1/8이 확정됐으면 ref 점수만으로 반대 인원 폴더로 바꾸지 않음
-        if alternate_party is not None and party_uncertain:
+        # 혼합 스캔으로 이미 폴더를 골랐으면 점수만으로 반대 폴더로 바꾸지 않음
+        if (
+            alternate_party is not None
+            and party_uncertain
+            and scan_party is not None
+        ):
             alt_confident, alt_ranked, alt_resolved = self.map_matcher.match_with_ranked(
                 map_window,
                 zone_hint["id"],
                 party_size=alternate_party,
-                top_k=3,
+                top_k=self.REF_MATCH_TOP_K,
                 exclude_ref_names=exclude_set or None,
                 full_scan=full_scan,
             )

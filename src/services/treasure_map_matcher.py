@@ -17,6 +17,7 @@ from PIL import Image
 
 from src.services.image_similarity import (
     enhance_terrain_features,
+    phase_align_gray,
     terrain_similarity_from_features,
 )
 from src.app_config import is_debug_query, is_debug
@@ -37,6 +38,16 @@ class TreasureMapMatch:
     ref_name: str
     terrain_score: float = 0.0
     marker_dist: float = 1.0
+
+
+@dataclass(frozen=True)
+class ZoneTerrainIdentification:
+    """전 존 지형 비교 결과 — spot 식별 전 1차 zone 후보"""
+
+    zone_id: str
+    score: float
+    margin: float
+    best_ref_name: str | None = None
 
 
 @dataclass
@@ -89,9 +100,10 @@ class TreasureMapMatcher:
     EARLY_EXIT_MARGIN = 0.12
 
     COARSE_MAX_SIDE = 128
-    COARSE_SCALE_STEPS = 3
-    REFINE_SCALE_STEPS = 5
-    REFINE_TOP_K = 5
+    COARSE_SCALE_STEPS = 4
+    REFINE_SCALE_STEPS = 7
+    REFINE_TOP_K = 12
+    FULL_SCAN_REF_THRESHOLD = 8
     MARKER_ALIGN_MAX_DIST = 0.12
     MARKER_BONUS_CAP = 0.12
     MARKER_MISMATCH_PENALTY = 0.50
@@ -100,6 +112,9 @@ class TreasureMapMatcher:
     MARKER_CLUSTER_BONUS_THRESHOLD = 0.13
     MARKER_CLUSTER_BONUS_SCALE = 2.0
     MARKER_CLUSTER_PENALTY_START = 0.12
+    TERRAIN_ZONE_CONFIDENT_SCORE = 0.82
+    TERRAIN_ZONE_MIN_MARGIN = 0.08
+    TERRAIN_ZONE_REFINE_TOP = 3
 
     def __init__(
         self,
@@ -173,6 +188,51 @@ class TreasureMapMatcher:
             and self.count_zone_refs(zone_id, 8) > 0
         )
 
+    def compare_party_folder_coarse(
+        self, fragment: Image.Image, zone_id: str
+    ) -> tuple[float, float]:
+        """solo/party8 ref 폴더별 coarse 최고점 — 인원 아이콘 보조 검증용"""
+        solo = self._max_coarse_score(fragment, zone_id, 1)
+        party8 = self._max_coarse_score(fragment, zone_id, 8)
+        return solo, party8
+
+    def _max_coarse_score(
+        self,
+        fragment: Image.Image,
+        zone_id: str,
+        party_size: int,
+    ) -> float:
+        entries = self._load_zone_entries(zone_id, party_size)
+        if not entries:
+            return -1.0
+
+        match_fragment = self._normalize_query_to_refs(fragment, entries)
+        _patch, query_gray, query_center = (
+            TreasureCaptureProcessor.prepare_matching_patch(match_fragment)
+        )
+        query_feat = enhance_terrain_features(query_gray)
+        query_weights = TreasureCaptureProcessor.build_soft_center_weights(
+            query_gray.shape[0],
+            query_gray.shape[1],
+            query_center,
+        )
+        q_feat_c, q_weights_c = self._resize_pair(
+            query_feat,
+            query_weights,
+            self.COARSE_MAX_SIDE,
+        )
+        coarse_query_scales = self._build_scale_packs(
+            q_feat_c,
+            q_weights_c,
+            np.linspace(0.92, 1.08, self.COARSE_SCALE_STEPS),
+        )
+        best = -1.0
+        for entry in entries:
+            score = self._coarse_score_optimized(coarse_query_scales, entry)
+            if score > best:
+                best = score
+        return best
+
     @staticmethod
     def _ref_party_size(ref_name: str) -> int | None:
         if ref_name.startswith("solo/"):
@@ -226,8 +286,9 @@ class TreasureMapMatcher:
         use_full_scan = (
             full_scan
             or bool(exclude_ref_names)
-            or entry_count <= 8
             or split_zone
+            or entry_count <= 8
+            or entry_count > self.FULL_SCAN_REF_THRESHOLD
         )
         scored, query_rel = self._score_zone(
             fragment,
@@ -277,6 +338,7 @@ class TreasureMapMatcher:
                     )
 
         self._log_ref_top3(zone_id, scored, query_rel)
+        display_scored = sorted(scored, key=lambda item: item[1], reverse=True)
         ranked = [
             self._to_match(
                 (adjusted, ccorr, ssim),
@@ -285,7 +347,9 @@ class TreasureMapMatcher:
                 marker_dist=marker_dist,
                 log_confirmed=False,
             )
-            for adjusted, combined, ccorr, ssim, entry, marker_dist in scored[:top_k]
+            for adjusted, combined, ccorr, ssim, entry, marker_dist in display_scored[
+                :top_k
+            ]
         ]
         confident = self._pick_confident_match(scored, query_rel, zone_id)
         return confident, ranked, resolved_party
@@ -309,6 +373,165 @@ class TreasureMapMatcher:
             fragment, zone_id, party_size=party_size, top_k=top_k
         )
         return ranked
+
+    def identify_zone_from_terrain(
+        self,
+        fragment: Image.Image,
+        *,
+        party_size: int | None = None,
+        refine_top_k: int | None = None,
+    ) -> tuple[str | None, float, float]:
+        """
+        캡처 지형을 전 존 ref와 비교해 zone_id 추정.
+
+        Returns:
+            (zone_id, score, margin) — 확신 시 zone_id, 아니면 (None, best_score, margin)
+        """
+        ranked = self.rank_zones_by_terrain(
+            fragment,
+            party_size=party_size,
+            refine_top_k=refine_top_k,
+        )
+        if not ranked:
+            return None, 0.0, 0.0
+        best = ranked[0]
+        if (
+            best.score >= self.TERRAIN_ZONE_CONFIDENT_SCORE
+            and best.margin >= self.TERRAIN_ZONE_MIN_MARGIN
+        ):
+            return best.zone_id, best.score, best.margin
+        return None, best.score, best.margin
+
+    def rank_zones_by_terrain(
+        self,
+        fragment: Image.Image,
+        *,
+        party_size: int | None = None,
+        refine_top_k: int | None = None,
+    ) -> list[ZoneTerrainIdentification]:
+        """전 존 지형 유사도 순위 — 디버그·QC용"""
+        zone_ids = self.zone_ids_with_refs()
+        if not zone_ids:
+            return []
+
+        query_ctx = self._build_matching_query_context(fragment)
+        if query_ctx is None:
+            return []
+
+        coarse_scales, refine_scales, query_feat, query_weights = query_ctx
+        t0 = time.perf_counter()
+
+        coarse_rows: list[tuple[str, float, _RefEntry | None]] = []
+        for zone_id in zone_ids:
+            score, entry = self._zone_coarse_best_score(
+                coarse_scales, zone_id, party_size
+            )
+            coarse_rows.append((zone_id, score, entry))
+
+        coarse_rows.sort(key=lambda item: item[1], reverse=True)
+        top_k = refine_top_k if refine_top_k is not None else self.TERRAIN_ZONE_REFINE_TOP
+
+        final_rows: list[tuple[str, float, _RefEntry | None]] = []
+        for zone_id, coarse_score, entry in coarse_rows[: max(1, top_k)]:
+            if entry is None:
+                final_rows.append((zone_id, coarse_score, None))
+                continue
+            refined, _ccorr, _ssim = self._refine_score_optimized(
+                refine_scales,
+                query_feat,
+                query_weights,
+                entry,
+            )
+            final_rows.append((zone_id, max(coarse_score, refined), entry))
+
+        tail = coarse_rows[max(1, top_k) :]
+        final_rows.extend((zone_id, score, entry) for zone_id, score, entry in tail)
+        final_rows.sort(key=lambda item: item[1], reverse=True)
+
+        if is_debug():
+            logger.debug(
+                "terrain_zone top5 (%.0fms): %s",
+                (time.perf_counter() - t0) * 1000,
+                [
+                    (zone_id, round(score, 3), entry.ref_name if entry else None)
+                    for zone_id, score, entry in final_rows[:5]
+                ],
+            )
+
+        results: list[ZoneTerrainIdentification] = []
+        for idx, (zone_id, score, entry) in enumerate(final_rows):
+            if idx == 0:
+                second = final_rows[1][1] if len(final_rows) > 1 else 0.0
+                margin = score - max(second, 0.0)
+            else:
+                margin = 0.0
+            results.append(
+                ZoneTerrainIdentification(
+                    zone_id=zone_id,
+                    score=score,
+                    margin=margin if idx == 0 else 0.0,
+                    best_ref_name=entry.ref_name if entry else None,
+                )
+            )
+        return results
+
+    def _build_matching_query_context(
+        self, fragment: Image.Image
+    ) -> tuple[
+        list[_ScalePack],
+        list[_ScalePack],
+        np.ndarray,
+        np.ndarray,
+    ] | None:
+        """지형 매칭용 쿼리 feature — 존 루프 밖 1회 생성"""
+        _patch, query_gray, query_center = (
+            TreasureCaptureProcessor.prepare_matching_patch(fragment)
+        )
+        if query_gray.size == 0:
+            return None
+
+        query_feat = enhance_terrain_features(query_gray)
+        query_weights = TreasureCaptureProcessor.build_soft_center_weights(
+            query_gray.shape[0],
+            query_gray.shape[1],
+            query_center,
+        )
+        q_feat_c, q_weights_c = self._resize_pair(
+            query_feat,
+            query_weights,
+            self.COARSE_MAX_SIDE,
+        )
+        coarse_scales = self._build_scale_packs(
+            q_feat_c,
+            q_weights_c,
+            np.linspace(0.92, 1.08, self.COARSE_SCALE_STEPS),
+        )
+        refine_scales = self._build_scale_packs(
+            query_feat,
+            query_weights,
+            np.linspace(0.88, 1.12, self.REFINE_SCALE_STEPS),
+        )
+        return coarse_scales, refine_scales, query_feat, query_weights
+
+    def _zone_coarse_best_score(
+        self,
+        coarse_query_scales: list[_ScalePack],
+        zone_id: str,
+        party_size: int | None,
+    ) -> tuple[float, _RefEntry | None]:
+        """존 내 ref coarse 최고점 — cross-zone 식별용 (marker 보정 없음)"""
+        entries = self._load_zone_entries(zone_id, party_size)
+        if not entries:
+            return -1.0, None
+
+        best_score = -1.0
+        best_entry: _RefEntry | None = None
+        for entry in entries:
+            score = self._coarse_score_optimized(coarse_query_scales, entry)
+            if score > best_score:
+                best_score = score
+                best_entry = entry
+        return best_score, best_entry
 
     def _pick_confident_match(
         self,
@@ -346,6 +569,9 @@ class TreasureMapMatcher:
             marker_pick = self._pick_by_marker_alignment(scored, query_rel)
             if marker_pick is not None:
                 return marker_pick
+            terrain_pick = self._pick_by_terrain_margin(scored)
+            if terrain_pick is not None:
+                return terrain_pick
             logger.debug(
                 "ref margin 부족 %s adj=%.3f margin=%.3f need>=%.3f",
                 zone_id,
@@ -477,7 +703,7 @@ class TreasureMapMatcher:
         best_coarse = -1.0
         second_coarse = -1.0
         best_coarse_entry: _RefEntry | None = None
-        allow_early_exit = not full_scan
+        allow_early_exit = not full_scan and len(entries) <= self.FULL_SCAN_REF_THRESHOLD
         t_coarse_start = time.perf_counter()
 
         for entry in entries:
@@ -533,7 +759,9 @@ class TreasureMapMatcher:
         t_coarse_end = time.perf_counter()
         coarse_scored.sort(key=lambda item: item[0], reverse=True)
         refine_top_k = (
-            min(8, len(entries)) if len(entries) <= 8 else self.REFINE_TOP_K
+            len(entries)
+            if full_scan
+            else min(len(entries), self.REFINE_TOP_K)
         )
         if full_scan:
             finalists = [entry for _score, entry in coarse_scored]
@@ -601,6 +829,34 @@ class TreasureMapMatcher:
             (time.perf_counter() - t0) * 1000,
         )
         return scored, query_rel
+
+    def _pick_by_terrain_margin(
+        self,
+        scored: list[tuple[float, float, float, float, _RefEntry, float]],
+    ) -> TreasureMapMatch | None:
+        """marker 보정 점수가 비슷할 때 순수 지형 유사도로 확정"""
+        if len(scored) < 2:
+            return None
+        terrain_sorted = sorted(scored, key=lambda item: item[1], reverse=True)
+        best_adj, best_combined, best_ccorr, best_ssim, best_entry, marker_dist = (
+            terrain_sorted[0]
+        )
+        second_combined = terrain_sorted[1][1]
+        margin = best_combined - max(second_combined, 0.0)
+        if best_combined < self.CONFIDENT_SCORE - 0.04 or margin < self.STRONG_MARGIN:
+            return None
+        logger.debug(
+            "ref terrain tie-break %s terrain=%.3f margin=%.3f",
+            best_entry.path.name,
+            best_combined,
+            margin,
+        )
+        return self._to_match(
+            (best_adj, best_ccorr, best_ssim),
+            best_entry,
+            terrain_score=best_combined,
+            marker_dist=marker_dist,
+        )
 
     def _pick_by_marker_alignment(
         self,
@@ -767,6 +1023,9 @@ class TreasureMapMatcher:
         else:
             bonus = min(cls.MARKER_BONUS_CAP, max(0.0, 0.10 - dist) * 1.25)
             penalty = max(0.0, dist - 0.15) * cls.MARKER_MISMATCH_PENALTY
+        if terrain_score >= 0.85:
+            bonus *= 0.55
+            penalty *= 0.45
         return terrain_score + bonus - penalty
 
     @staticmethod
@@ -849,6 +1108,15 @@ class TreasureMapMatcher:
         )
         if combined > best_combined:
             best_combined, best_ccorr, best_ssim = combined, ccorr, ssim
+
+        ts_aligned = phase_align_gray(query_feat, ts_full)
+        combined_aligned, ccorr_a, ssim_a = terrain_similarity_from_features(
+            query_feat,
+            ts_aligned,
+            ssim_weight=np.sqrt(query_weights * wt_full),
+        )
+        if combined_aligned > best_combined:
+            best_combined, best_ccorr, best_ssim = combined_aligned, ccorr_a, ssim_a
 
         return best_combined, best_ccorr, best_ssim
 

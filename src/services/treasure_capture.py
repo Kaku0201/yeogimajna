@@ -2957,7 +2957,7 @@ class TreasureCaptureProcessor:
         icon: Image.Image,
         trace: PartyDetectTrace | None = None,
     ) -> int | None:
-        """숫자 ROI 위상(구멍 개수)으로 1/8 판별 — 1=구멍0, 8=구멍≥1"""
+        """숫자 ROI 위상(구멍 개수)으로 8 판별 — 1은 solo_icon_signals에서 처리"""
         if icon.height < 20 or icon.width < 30:
             return None
 
@@ -2983,11 +2983,10 @@ class TreasureCaptureProcessor:
         if trace is not None:
             trace.left_bright = left_bright
         if holes == 0:
-            # 구멍 0만으로 1 확정하지 않음 — 잘린 ROI·노이즈에서 8이 1로 오판됨
             return None
         if holes >= 1 and self._confirm_topology_eight(left_bright, holes):
             return 8
-        if holes >= 1 and is_debug():
+        if is_debug():
             logger.debug(
                 "[party] topology 8 rejected left_bright=%.3f holes=%d -> defer",
                 left_bright,
@@ -2997,12 +2996,98 @@ class TreasureCaptureProcessor:
 
     @staticmethod
     def _confirm_topology_eight(left_bright: float, holes: int) -> bool:
-        """8 판정 — 8은 위 구멍(holes≥1)이 핵심, 사람 아이콘 밝기는 보조"""
+        """8 판정 — 구멍 2개 이상만 자동 8 (1은 구멍 1개 오탐이 많음)"""
         if holes >= 2:
-            return True
-        if holes == 1:
             return left_bright >= 0.04
         return False
+
+    @staticmethod
+    def _solo_icon_signals(icon: Image.Image) -> bool:
+        """솔로(1인) — 숫자 1은 구멍 0, 오른쪽 숫자 영역만 밝음"""
+        gray = cv2.cvtColor(np.array(icon.convert("RGB")), cv2.COLOR_RGB2GRAY)
+        digit_roi = TreasureCaptureProcessor._party_digit_roi(gray)
+        if digit_roi is None:
+            return False
+        holes, _binary = TreasureCaptureProcessor._count_digit_holes(digit_roi)
+        if holes is None or holes != 0:
+            return False
+        _left, right_ratio = TreasureCaptureProcessor._party_icon_metrics(icon)
+        return 0.025 <= right_ratio <= 0.32
+
+    def _resolve_party_digit(
+        self,
+        icon: Image.Image,
+        trace: PartyDetectTrace | None = None,
+    ) -> int | None:
+        """OCR → 솔로 신호 → 위상(구멍) → full OCR 순으로 1/8 판별"""
+        left_bright = self._party_left_bright(icon)
+        if trace is not None:
+            trace.left_bright = left_bright
+            trace.icon_size = icon.size
+
+        gray = cv2.cvtColor(np.array(icon.convert("RGB")), cv2.COLOR_RGB2GRAY)
+        digit_roi = self._party_digit_roi(gray)
+        holes: int | None = None
+        if digit_roi is not None:
+            holes, _binary = self._count_digit_holes(digit_roi)
+            if trace is not None:
+                trace.topology_holes = holes if holes is not None else -1
+
+        ocr = self._ocr_party_digit_roi(icon, trace)
+        if ocr == 1:
+            if trace is not None:
+                trace.result = 1
+                trace.reason = "ocr1"
+            return 1
+        if ocr == 8:
+            if holes == 0:
+                if trace is not None:
+                    trace.ocr_digit = 8
+                    trace.reason = "ocr8_rejected_holes0"
+            else:
+                if trace is not None:
+                    trace.result = 8
+                    trace.reason = "ocr8"
+                return 8
+
+        if self._solo_icon_signals(icon):
+            if trace is not None:
+                trace.result = 1
+                trace.reason = "solo_topology0"
+            return 1
+
+        topology = self._topology_party_digit(icon, trace)
+        if topology == 8:
+            if trace is not None:
+                trace.result = 8
+                trace.reason = "topology8"
+            return 8
+
+        ocr_full = self._ocr_party_icon_full(icon, trace)
+        if ocr_full == 1:
+            if trace is not None:
+                trace.result = 1
+                trace.reason = "ocr_full1"
+            return 1
+        if ocr_full == 8 and holes != 0:
+            if trace is not None:
+                trace.result = 8
+                trace.reason = "ocr_full8"
+            return 8
+
+        _left, right_ratio = self._party_icon_metrics(icon)
+        if trace is not None:
+            trace.right_ratio = right_ratio
+        if 0.03 <= right_ratio <= 0.28 and left_bright < 0.22:
+            if trace is not None:
+                trace.result = 1
+                trace.reason = "digit_bright_solo"
+            return 1
+
+        if trace is not None:
+            trace.result = None
+            trace.reason = "no_signal"
+        return None
 
     def _save_party_debug_images(
         self,
@@ -3178,7 +3263,7 @@ class TreasureCaptureProcessor:
         icon: Image.Image,
         trace: PartyDetectTrace | None = None,
     ) -> int | None:
-        """OCR 실패·오인식 보정 — 8인은 왼쪽 그룹 아이콘이 넓게 밝게 잡힘"""
+        """레거시 보조 — left_bright만으로 8 확정하지 않음"""
         if icon.height < 28 or icon.width < 40:
             return None
 
@@ -3187,70 +3272,15 @@ class TreasureCaptureProcessor:
             trace.left_bright = left_bright
             trace.right_ratio = right_ratio
 
-        if left_bright >= 0.12:
+        gray = cv2.cvtColor(np.array(icon.convert("RGB")), cv2.COLOR_RGB2GRAY)
+        digit_roi = self._party_digit_roi(gray)
+        holes = 0
+        if digit_roi is not None:
+            counted, _binary = self._count_digit_holes(digit_roi)
+            if counted is not None:
+                holes = counted
+        if holes >= 2 and left_bright >= 0.18:
             return 8
-        return None
-
-    def _resolve_party_digit(
-        self,
-        icon: Image.Image,
-        trace: PartyDetectTrace | None = None,
-    ) -> int | None:
-        """OCR → 위상(구멍) → full OCR → 휴리스틱 순으로 1/8 판별"""
-        left_bright = self._party_left_bright(icon)
-        if trace is not None:
-            trace.left_bright = left_bright
-            trace.icon_size = icon.size
-
-        ocr = self._ocr_party_digit_roi(icon, trace)
-        if ocr in (1, 8):
-            if trace is not None:
-                trace.result = ocr
-                trace.reason = f"ocr{ocr}"
-            return ocr
-
-        topology = self._topology_party_digit(icon, trace)
-        if topology == 8:
-            if trace is not None:
-                trace.result = 8
-                trace.reason = "topology8"
-            return 8
-        if topology == 1:
-            if trace is not None:
-                trace.result = 1
-                trace.reason = "topology1"
-            return 1
-
-        ocr_full = self._ocr_party_icon_full(icon, trace)
-        if ocr_full in (1, 8):
-            if trace is not None:
-                trace.result = ocr_full
-                trace.reason = f"ocr_full{ocr_full}"
-            return ocr_full
-
-        heuristic = self._heuristic_party_digit(icon, trace)
-        if trace is not None:
-            trace.heuristic = heuristic
-
-        if heuristic in (1, 8):
-            if trace is not None:
-                trace.result = heuristic
-                trace.reason = "heuristic_only"
-            return heuristic
-
-        # 마지막 — digit ROI 밝기만으로 1 추정 (8은 OCR/구멍에서 잡혀야 함)
-        _left, right_ratio = self._party_icon_metrics(icon)
-        if trace is not None:
-            trace.right_ratio = right_ratio
-        if right_ratio > 0.04 and right_ratio < 0.22:
-            if trace is not None:
-                trace.result = 1
-                trace.reason = "digit_bright_solo"
-            return 1
-
-        if trace is not None:
-            trace.result = None
-            trace.reason = "no_signal"
         return None
 
     def _log_party_trace(self, trace: PartyDetectTrace) -> None:
@@ -3358,12 +3388,16 @@ class TreasureCaptureProcessor:
                 results.append((parsed, trace))
 
         if results:
-            eights = [item for item in results if item[0] == 8]
             ones = [item for item in results if item[0] == 1]
-            if eights:
+            eights = [item for item in results if item[0] == 8]
+            if len(ones) > len(eights):
+                parsed, trace = ones[0]
+            elif len(eights) > len(ones):
                 parsed, trace = eights[0]
             elif ones:
                 parsed, trace = ones[0]
+            elif eights:
+                parsed, trace = eights[0]
             else:
                 parsed, trace = results[0]
             self._last_party_trace = trace

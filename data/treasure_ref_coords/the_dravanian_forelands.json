@@ -5,8 +5,8 @@
     "party_sizes": [
       1
     ],
-    "marker_rx": 0.4939,
-    "marker_ry": 0.5073
+    "marker_rx": 0.498,
+    "marker_ry": 0.4884
   },
   "solo/14.94_33.94.png": {
     "x": 14.94,
@@ -14,8 +14,8 @@
     "party_sizes": [
       1
     ],
-    "marker_rx": 0.5521,
-    "marker_ry": 0.5725
+    "marker_rx": 0.5002,
+    "marker_ry": 0.4972
   },
   "solo/15.08_21.39.png": {
     "x": 15.08,
@@ -23,8 +23,8 @@
     "party_sizes": [
       1
     ],
-    "marker_rx": 0.5,
-    "marker_ry": 0.5073
+    "marker_rx": 0.4995,
+    "marker_ry": 0.488
   },
   "solo/19.05_35.06.png": {
     "x": 19.05,
@@ -32,8 +32,8 @@
     "party_sizes": [
       1
     ],
-    "marker_rx": 0.4969,
-    "marker_ry": 0.5073
+    "marker_rx": 0.4992,
+    "marker_ry": 0.4921
   },
   "solo/25.77_21.21.png": {
     "x": 25.77,
@@ -41,8 +41,8 @@
     "party_sizes": [
       1
     ],
-    "marker_rx": 0.4969,
-    "marker_ry": 0.5073
+    "marker_rx": 0.5049,
+    "marker_ry": 0.4881
   },
   "solo/27.91_28.35.png": {
     "x": 27.91,
@@ -50,8 +50,8 @@
     "party_sizes": [
       1
     ],
-    "marker_rx": 0.4907,
-    "marker_ry": 0.5
+    "marker_rx": 0.4936,
+    "marker_ry": 0.4904
   },
   "solo/35.37_30.02.png": {
     "x": 35.37,
@@ -59,8 +59,8 @@
     "party_sizes": [
       1
     ],
-    "marker_rx": 0.5736,
-    "marker_ry": 0.2935
+    "marker_rx": 0.4663,
+    "marker_ry": 0.5161
   },
   "solo/38.51_24.12.png": {
     "x": 38.51,
@@ -68,7 +68,7 @@
     "party_sizes": [
       1
     ],
-    "marker_rx": 0.5031,
-    "marker_ry": 0.5073
+    "marker_rx": 0.4999,
+    "marker_ry": 0.4926
   }
 }

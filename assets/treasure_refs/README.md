@@ -39,8 +39,8 @@ python scripts/split_treasure_grid.py <그리드.png> <zone_id>
 ## 창천
 
 - `창천/coerthas_western_highlands/` — 22장 (커르다스 서부고지)
-- `창천/the_dravanian_hinterlands/` — 26장 (고지 드라바니아)
-- `창천/the_dravanian_forelands/` — 8장 (저지 드라바니아)
+- `창천/the_dravanian_hinterlands/` — 26장 (저지 드라바니아)
+- `창천/the_dravanian_forelands/` — 8장 (고지 드라바니아)
 - `창천/the_churning_mists/` — 26장 (드라바니아 구름바다)
 - `창천/the_sea_of_clouds/` — 20장 (아발라시아 구름바다)
 

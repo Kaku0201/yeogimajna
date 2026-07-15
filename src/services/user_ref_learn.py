@@ -192,6 +192,14 @@ class UserRefLearnService:
         combined, _, _ = terrain_similarity_from_features(a, b)
         return combined
 
+    @staticmethod
+    def _ref_party_size(ref_name: str) -> int | None:
+        if ref_name.startswith("solo/"):
+            return 1
+        if ref_name.startswith("party8/"):
+            return 8
+        return None
+
     def get_ref_hits(self, zone_id: str, ref_name: str) -> int:
         for entry in self._data.get(zone_id, []):
             if entry.get("ref_name") == ref_name:
@@ -225,6 +233,7 @@ class UserRefLearnService:
         self,
         zone_id: str,
         map_window: Image.Image,
+        party_size: int | None = None,
     ) -> LearnedRefHit | None:
         entries = self._data.get(zone_id)
         if not entries:
@@ -234,6 +243,14 @@ class UserRefLearnService:
         best: LearnedRefHit | None = None
 
         for entry in entries:
+            ref_name = str(entry.get("ref_name", ""))
+            ref_party = self._ref_party_size(ref_name)
+            entry_party = entry.get("party_size")
+            if party_size in (1, 8):
+                if ref_party in (1, 8) and ref_party != party_size:
+                    continue
+                if entry_party in (1, 8) and int(entry_party) != party_size:
+                    continue
             hits = int(entry.get("hits", 1))
             threshold = self._hit_threshold(hits)
             best_score = 0.0
